@@ -121,20 +121,19 @@ def make_langgraph_tool(qa_chain):
         return {"answer": answer, "sources": sources}
     return rag_tool
 
-@tool
-def run_ase_script(code: str, filename: str) -> None:
-    """Run Python code that defines an ASE Atoms object as `atoms` and writes the atoms object to an extxyz file with a descriptive and unique name.
-    Args:
-        code: Python code to execute
-        filename: descriptive and unique filename. 
-        """
-    local_env = {}
-    exec(code, {}, local_env)
-    atoms = local_env.get("atoms")
-    if not isinstance(atoms, Atoms):
-        raise ValueError("Script did not define an ASE Atoms object named `atoms`.")
-    else:
-        ase.io.write(filename,atoms,format="vasp")
+
+def RAG_ASE():
+    """create ASE knowledge base from ase code found in local environment """
+    ase_src = get_ase_source_path()
+    if not ase_src.exists():
+        raise FileNotFoundError(f"ASE source not found: {ase_src}")
+    print("Loading ASE files...")
+    docs = load_text_documents(ase_src)
+    print(f"Indexed {len(docs)} files.")
+    retriever = build_vector_store_and_retriever(docs)
+    qa_chain = make_qa_chain(retriever)
+    rag_tool = make_langgraph_tool(qa_chain)
+    return rag_tool
 
 # ---- Main ----
 def main():

@@ -7,7 +7,7 @@ from PIL import Image
 import io
 
 # Configuration
-pdf_path = Path("0D-ZnO.pdf")
+pdf_path = Path("papers/park-et-al-2009-hetero-epitaxial-anion-exchange-yields-single-crystalline-hollow-nanoparticles.pdf")
 output_folder = Path("Output_TEM/ZnO_Output")
 output_folder.mkdir(parents=True, exist_ok=True)
 csv_path = output_folder / "figures_and_captions.csv"

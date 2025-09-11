@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--plan-model", default=None, help="Model for planning (default env MODEL_PLAN_NAME or gemini-2.5-flash)")
     parser.add_argument("--code-model", default=None, help="Model for codegen (default env MODEL_CODE_NAME or gemini-2.5-pro)")
     parser.add_argument("--save-code", default=None, help="Optional path to save generated code (e.g., generated_ase.py)")
+    parser.add_argument("--mp-validate", action="store_true", help="Run Materials Project validation node (requires MP_MCP_ENDPOINT)")
     args = parser.parse_args()
 
     if args.skip_exec:
@@ -24,6 +25,9 @@ def main():
         if args.plan_model:
             state["plan_model"] = args.plan_model
         state.update(plan_targets(state))
+        if args.mp_validate:
+            from .mp_mcp import mp_validate_from_text
+            state["mp_validation"] = mp_validate_from_text(state.get("target_plan",""))
         if args.code_model:
             state["code_model"] = args.code_model
         state.update(synthesize_code(state))
@@ -37,6 +41,8 @@ def main():
 
     final = run_graph(args.pdf, args.notes, plan_model=args.plan_model, code_model=args.code_model)
     print("Return code:", final.get("run_rc"))
+    if args.mp_validate:
+        print("MP validation:", final.get("mp_validation"))
     if final.get("generated_code") and args.save_code:
         with open(args.save_code, "w", encoding="utf-8") as f:
             f.write(final["generated_code"])

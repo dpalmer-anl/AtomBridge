@@ -4,6 +4,7 @@ from typing_extensions import TypedDict
 
 from langgraph.graph import StateGraph, START, END
 from langchain.chat_models import init_chat_model
+from .mp_mcp import mp_validate_from_text
 
 from .utils_paper_and_code import parse_pdf, extract_code, run_code
 from .create_ASE_RAG import RAG_ASE
@@ -95,12 +96,20 @@ def build_graph():
     g = StateGraph(S)
     g.add_node("load_paper", load_paper)
     g.add_node("plan_targets", plan_targets)
+    # Optional validation against Materials Project MCP
+    def mp_validate(state: S) -> S:
+        plan = state.get("target_plan", "")
+        res = mp_validate_from_text(plan)
+        return {"mp_validation": res}
+
+    g.add_node("mp_validate", mp_validate)
     g.add_node("synthesize_code", synthesize_code)
     g.add_node("run_generated_code", run_generated_code)
 
     g.add_edge(START, "load_paper")
     g.add_edge("load_paper", "plan_targets")
-    g.add_edge("plan_targets", "synthesize_code")
+    g.add_edge("plan_targets", "mp_validate")
+    g.add_edge("mp_validate", "synthesize_code")
     g.add_edge("synthesize_code", "run_generated_code")
     g.add_edge("run_generated_code", END)
 

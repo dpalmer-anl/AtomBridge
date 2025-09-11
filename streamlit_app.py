@@ -6,6 +6,7 @@ import streamlit as st
 from src.graph import load_paper, plan_targets, synthesize_code, run_generated_code
 from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt
 from src.create_ASE_RAG import RAG_ASE
+from src.mp_mcp import mp_validate_from_text
 
 
 UPLOAD_DIR = Path("_uploads")
@@ -89,6 +90,22 @@ def generate_and_fix_code(user_prompt: str, paper_text: str, code_model: str, ma
         if rc == 0:
             break
 
+    # Build a concise fix report
+    fix_lines = []
+    for h in history:
+        if h["rc"] == 0:
+            fix_lines.append(f"Iteration {h['iteration']}: success.")
+        else:
+            # include an error snippet and note that we attempted a fix
+            err = (h.get("stderr") or "").splitlines()
+            err_snip = "; ".join(err[:2]) if err else "error occurred"
+            # simple supercell hint
+            supercell_hint = "supercell" if "supercell" in (h.get("stderr") or "").lower() else None
+            if supercell_hint:
+                fix_lines.append(f"Iteration {h['iteration']}: error while generating supercell — {err_snip}. Tried to regenerate code with error context.")
+            else:
+                fix_lines.append(f"Iteration {h['iteration']}: error — {err_snip}. Tried to regenerate code with error context.")
+
     return {
         "code": last_code,
         "stdout": last_stdout,
@@ -96,6 +113,81 @@ def generate_and_fix_code(user_prompt: str, paper_text: str, code_model: str, ma
         "rc": last_rc,
         "iterations": len(history),
         "history": history,
+        "fix_report": "\n".join(fix_lines) if fix_lines else "",
+    }
+
+
+def generate_and_fix_code_v2(user_prompt: str, paper_text: str, code_model: str, max_iters: int = 3):
+    """Revised: generate code via ASE RAG and iteratively fix on errors.
+    Returns dict with: code, stdout, stderr, rc, iterations, history, fix_report.
+    """
+    rag_tool = RAG_ASE(model_name=code_model)
+    history = []
+    last_code = ""
+    last_stdout = ""
+    last_stderr = ""
+    last_rc = 1
+
+    for i in range(max_iters):
+        if i == 0:
+            query = (
+                "Write Python code that constructs ase.Atoms objects for the task below, "
+                "creates supercells/defects/GBs as requested, and writes each to .cif via ase.io.write.\n"
+                "Only return a single fenced Python code block.\n\n"
+                f"Task: {user_prompt}\n\n"
+                "Paper context (may contain targets and lattice hints):\n"
+                f"{paper_text[:8000]}\n"
+            )
+        else:
+            query = (
+                "The previous generated code failed. Here is the error. Fix the code.\n"
+                "Return only a single fenced Python code block that can run as-is.\n\n"
+                f"Error:\n{last_stderr[:4000]}\n\n"
+                f"Original task: {user_prompt}\n"
+            )
+
+        rag_res = rag_tool(query)
+        answer = rag_res.get("answer", "") or ""
+        code = extract_code(answer)
+        stdout, stderr, rc = run_code(code)
+        history.append({
+            "iteration": i + 1,
+            "query": query,
+            "answer": answer,
+            "code": code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "rc": rc,
+        })
+        last_code, last_stdout, last_stderr, last_rc = code, stdout, stderr, rc
+        if rc == 0:
+            break
+
+    # Build fix report
+    fix_lines = []
+    for h in history:
+        if h.get("rc") == 0:
+            fix_lines.append(f"Iteration {h['iteration']}: success.")
+        else:
+            err = (h.get("stderr") or "").splitlines()
+            err_snip = "; ".join(err[:2]) if err else "error occurred"
+            if "supercell" in (h.get("stderr") or "").lower():
+                fix_lines.append(
+                    f"Iteration {h['iteration']}: error while generating supercell — {err_snip}. Tried to regenerate code with error context."
+                )
+            else:
+                fix_lines.append(
+                    f"Iteration {h['iteration']}: error — {err_snip}. Tried to regenerate code with error context."
+                )
+
+    return {
+        "code": last_code,
+        "stdout": last_stdout,
+        "stderr": last_stderr,
+        "rc": last_rc,
+        "iterations": len(history),
+        "history": history,
+        "fix_report": "\n".join(fix_lines) if fix_lines else "",
     }
 
 
@@ -144,6 +236,31 @@ with st.sidebar:
             index=["gemini-2.5-flash", "gemini-2.5-pro"].index(plan_model),
             help="Used for extracting targets/plan from the paper",
         )
+    st.divider()
+    st.subheader("Materials Project MCP")
+    st.caption("Optionally validate using an MCP server. See: https://glama.ai/mcp/servers/@fair2wise/materials_project_mcp")
+    default_mp_endpoint = os.getenv("MP_MCP_ENDPOINT", "")
+    mp_endpoint = st.text_input("MCP Endpoint", value=default_mp_endpoint, placeholder="http://localhost:8000")
+    mp_api_key = st.text_input("MP API key (optional)", type="password")
+    col_mp1, col_mp2 = st.columns(2)
+    with col_mp1:
+        if st.button("Use MP settings for this session"):
+            if mp_endpoint.strip():
+                os.environ["MP_MCP_ENDPOINT"] = mp_endpoint.strip()
+                st.success("MCP endpoint set for this session.")
+            if mp_api_key.strip():
+                os.environ["MP_API_KEY"] = mp_api_key.strip()
+                st.success("MP API key set for this session.")
+    with col_mp2:
+        validate_mcp = st.checkbox("Validate with MCP during run", value=False)
+    if st.button("Validate last result (MCP)"):
+        if "last_result" in st.session_state and st.session_state.get("last_result") and os.getenv("MP_MCP_ENDPOINT"):
+            plan_text = st.session_state.get("paper_text") or ""
+            val = mp_validate_from_text(plan_text)
+            st.session_state.last_result["mp_validation"] = val
+            st.success("Validated last result (see Materials Project Validation section).")
+        else:
+            st.warning("No last result or MCP endpoint not set.")
         code_model = st.selectbox(
             "Codegen model",
             options=["gemini-2.5-pro", "gemini-2.5-flash"],
@@ -172,6 +289,12 @@ if "suggested_prompts" not in st.session_state:
     st.session_state.suggested_prompts = []
 if "conversation" not in st.session_state:
     st.session_state.conversation = []  # list of {role: user/assistant, content: str}
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
+if "last_cifs" not in st.session_state:
+    st.session_state.last_cifs = []
+if "last_code" not in st.session_state:
+    st.session_state.last_code = ""
 
 analyze = st.button("Analyze Paper & Suggest Prompts")
 if analyze:
@@ -301,12 +424,16 @@ if (dry or full or auto_exec):
                 if st.session_state.paper_text is None:
                     st.session_state.paper_text = state.get("paper_text")
                 # Use iterative codegen + fix
-                result = generate_and_fix_code(
+                result = generate_and_fix_code_v2(
                     user_prompt=final_prompt,
                     paper_text=st.session_state.paper_text or "",
                     code_model=code_model,
                     max_iters=3 if do_exec else 1,
                 )
+                # Optional MP validation
+                if 'validate_mcp' in locals() and validate_mcp and os.getenv("MP_MCP_ENDPOINT"):
+                    mp_res = mp_validate_from_text(st.session_state.paper_text or "")
+                    result["mp_validation"] = mp_res
                 # If not executing, do not run; just show the code produced in first iteration
                 if not do_exec:
                     result["rc"] = None
@@ -320,22 +447,13 @@ if (dry or full or auto_exec):
         st.session_state["auto_exec"] = False
 
     st.success("Done")
+    st.session_state.last_result = result
     if "target_plan" in result:
         st.subheader("Target Plan")
         st.write(result.get("target_plan", "(none)"))
 
-    st.subheader("Generated Code")
     code = (result.get("generated_code") or result.get("code") or "")
-    if code:
-        st.code(code, language="python")
-        st.download_button(
-            "Download generated_ase.py",
-            data=code,
-            file_name="generated_ase.py",
-            mime="text/x-python",
-        )
-    else:
-        st.info("No code generated.")
+    st.session_state.last_code = code
 
     if do_exec:
         st.subheader("Execution Output")
@@ -344,6 +462,9 @@ if (dry or full or auto_exec):
             st.text(result.get("run_stdout") or result.get("stdout") or "")
         with st.expander("STDERR"):
             st.text(result.get("run_stderr") or result.get("stderr") or "")
+        if result.get("fix_report"):
+            st.subheader("Fix Attempts Summary")
+            st.text(result["fix_report"]) 
 
         st.subheader("Generated CIF Files (recent)")
         # List CIFs modified after start_ts
@@ -354,14 +475,64 @@ if (dry or full or auto_exec):
                     cif_files.append(p)
             except Exception:
                 continue
+        st.session_state.last_cifs = [str(p) for p in cif_files]
         if cif_files:
             for p in cif_files:
-                with open(p, "rb") as f:
-                    st.download_button(
-                        f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
-                    )
+                with st.expander(p.name):
+                    try:
+                        txt = Path(p).read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        txt = "(binary or unreadable)"
+                    st.code(txt[:20000], language="text")
+                    with open(p, "rb") as f:
+                        st.download_button(
+                            f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
+                        )
         else:
             st.info("No new CIF files detected. Check STDERR for issues.")
+
+    # Code expander
+    if code:
+        with st.expander("Show Generated Code"):
+            st.code(code, language="python")
+            st.download_button(
+                "Download generated_ase.py",
+                data=code,
+                file_name="generated_ase.py",
+                mime="text/x-python",
+            )
+    else:
+        st.info("No code generated.")
+
+    if result.get("mp_validation"):
+        st.subheader("Materials Project Validation")
+        st.json(result["mp_validation"])
+
+# If we have last results but not running now, still show for convenience
+elif st.session_state.last_result:
+    lr = st.session_state.last_result
+    st.info("Showing last run results. Adjust options and run again as needed.")
+    if lr.get("target_plan"):
+        st.subheader("Target Plan (last run)")
+        st.write(lr.get("target_plan"))
+    if st.session_state.last_cifs:
+        st.subheader("Generated CIF Files (last run)")
+        for p_str in st.session_state.last_cifs:
+            p = Path(p_str)
+            if p.exists():
+                with st.expander(p.name):
+                    try:
+                        txt = p.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        txt = "(binary or unreadable)"
+                    st.code(txt[:20000], language="text")
+                    with open(p, "rb") as f:
+                        st.download_button(
+                            f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
+                        )
+    if st.session_state.last_code:
+        with st.expander("Show Generated Code (last run)"):
+            st.code(st.session_state.last_code, language="python")
 
 st.divider()
 st.subheader("Conversation")
@@ -385,7 +556,7 @@ if regen:
     extra = ("\n\nConstraints:\n" + constraints_text) if constraints_text else ""
     combined_prompt = (final_prompt or "Generate CIFs from the paper") + extra + "\n" + convo_text
     with st.spinner("Regenerating code using conversation context…"):
-        result = generate_and_fix_code(
+        result = generate_and_fix_code_v2(
             user_prompt=combined_prompt,
             paper_text=st.session_state.paper_text or "",
             code_model=code_model,

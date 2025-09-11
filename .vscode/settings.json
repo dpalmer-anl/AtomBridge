@@ -1,0 +1,5 @@
+﻿{
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.venvPath": "C:\\Users\\gabeg\\Desktop",
+  "python.terminal.activateEnvironment": true
+}

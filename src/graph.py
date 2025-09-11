@@ -1,116 +1,123 @@
 import os
-from typing import Annotated
-import json
+from typing import Optional
 from typing_extensions import TypedDict
-from IPython.display import Image, display
-from typing import Annotated
 
-from langchain_tavily import TavilySearch
-from langchain_core.tools import tool
-
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
-from langgraph.types import Command, interrupt
 from langchain.chat_models import init_chat_model
 
-class State(TypedDict):
-    messages: Annotated[list, add_messages]
-
-#nodes
-def evaluate_paper(state: State):
-    """First LLM call to parse pdf and suggest structures"""
-    msg = llm.invoke(f"I am interested in investigating the \
-                     structures defined in this paper using atomistic simulation. \
-                     This paper contains TEM results with structural information. \
-                     Determine the structures of interest in this paper. \
-                     The structures of interest should be related to the main hypothesis of the paper. \
-                     Next, construct ase.atoms objects for the systems of interest. \
-                     Note these ase.atoms objects will be the starting point of a simulation (either DFT or MD). \
-                     In the event there are certain degrees of freedom that are unclear or poorly defined in the paper, \
-                     it may be useful to produce structures that sweep over several reasonable values.")
-    return {"structure_suggestion":msg.content}
+from .utils_paper_and_code import parse_pdf, extract_code, run_code
+from .create_ASE_RAG import RAG_ASE
 
 
-
-@tool
-def human_assistance(query: str) -> str:
-    """Request assistance from a human."""
-    human_response = interrupt({"query": query})
-    return human_response["data"]
-
-if os.environ["GOOGLE_API_KEY"] is None:
-    print("Warning: set GOOGLE_API_KEY in environment")
-
-llm = init_chat_model("google_genai:gemini-2.0-flash")
-graph_builder = StateGraph(State)
-
-
-tool = TavilySearch(max_results=2)
-tools = [tool, human_assistance,ase_RAG,pdf_parser]
-llm_with_tools = llm.bind_tools(tools)
-
-def chatbot(state: State):
-    message = llm_with_tools.invoke(state["messages"])
-    assert(len(message.tool_calls) <= 1)
-    return {"messages": [message]}
-
-graph_builder.add_node("chatbot", chatbot)
-
-tool_node = ToolNode(tools=tools)
-graph_builder.add_node("tools", tool_node)
-
-#nodes we need
-graph_builder.add_node("evaluate_paper",evaluate_paper) #determine the structures of interest from PDF plus TEM image plus user request/preference
-graph_builder.add_node("refine_structure_description",refine_structure_description) #add more context/user preference for how structures are created
-graph_builder.add_node("generate_structures",generate_structures) #use ase rag tool to generate confirmed structures
+class S(TypedDict, total=False):
+    """Pipeline state for TEM→unit cell→ASE→CIF flow."""
+    paper_path: str
+    paper_text: str
+    user_notes: Optional[str]
+    target_plan: str
+    rag_answer: str
+    generated_code: str
+    run_stdout: str
+    run_stderr: str
+    run_rc: int
+    # model selection
+    plan_model: Optional[str]
+    code_model: Optional[str]
 
 
-"""graph_builder.add_conditional_edges(
-    "chatbot",
-    tools_condition,
-)
-graph_builder.add_edge("tools", "chatbot")
-graph_builder.add_edge(START, "chatbot")"""
-
-#edges we need
-graph_builder.add_edge(START,"evaluate_paper")
-graph_builder.add_conditional_edges("evaluate_paper",confirm_structures,{"Fail":"refine_structure_description","Pass":"generate_structures"}) #confirm with users which structures to generate and that structures correspond with paper.
-graph_builder.add_edge("generate_structures",END) #generate structures and organize into folder tree
-graph = graph_builder.compile()
+def _get_llm(model_name: str):
+    return init_chat_model(model_name, model_provider="google_genai")
 
 
-###################################################
-
-# Extra stuff that is useful
-
-###################################################
-
-#visualize the graph
-try:
-    display(Image(graph.get_graph().draw_mermaid_png()))
-except Exception:
-    # This requires some extra dependencies and is optional
-    pass
-
-#run the chatbot
-def stream_graph_updates(user_input: str):
-    for event in graph.stream({"messages": [{"role": "user", "content": user_input}]}):
-        for value in event.values():
-            print("Assistant:", value["messages"][-1].content)
+def load_paper(state: S) -> S:
+    """Load and parse the PDF text into state.paper_text."""
+    pdf = state.get("paper_path")
+    if not pdf:
+        raise ValueError("paper_path must be provided in state")
+    text = parse_pdf(pdf)
+    return {"paper_text": text}
 
 
-while True:
-    try:
-        user_input = input("User: ")
-        if user_input.lower() in ["quit", "exit", "q"]:
-            print("Goodbye!")
-            break
-        stream_graph_updates(user_input)
-    except:
-        # fallback if input() is not available
-        user_input = "What do you know about LangGraph?"
-        print("User: " + user_input)
-        stream_graph_updates(user_input)
-        break
+def plan_targets(state: S) -> S:
+    """Use LLM to propose target systems and structure scope from paper text."""
+    paper = state.get("paper_text", "")
+    user = state.get("user_notes", "")
+    plan_model = (
+        state.get("plan_model")
+        or os.getenv("MODEL_PLAN_NAME")
+        or "gemini-2.5-flash"
+    )
+    prompt = (
+        "You are assisting with atomistic structure generation from a paper.\n"
+        "Paper text follows. Identify the crystalline systems relevant to the main hypothesis.\n"
+        "Propose primitive unit cells and any needed parameters (composition, lattice constants, space group).\n"
+        "If information is missing, make reasonable assumptions to sweep.\n\n"
+        f"User notes (optional): {user}\n\n"
+        f"Paper:\n{paper[:12000]}\n\n"
+        "Return a concise plan and the specific structures to generate."
+    )
+    llm = _get_llm(plan_model)
+    msg = llm.invoke(prompt)
+    return {"target_plan": msg.content}
+
+
+def synthesize_code(state: S) -> S:
+    """Use ASE RAG to draft Python code that builds ASE Atoms and writes CIF files."""
+    plan = state.get("target_plan", "")
+    code_model = (
+        state.get("code_model")
+        or os.getenv("MODEL_CODE_NAME")
+        or "gemini-2.5-pro"
+    )
+    rag_tool = RAG_ASE(model_name=code_model)
+    query = (
+        "Write Python code that constructs ase.Atoms objects for the systems described below, "
+        "creates supercells where appropriate, optionally introduces defects or grain boundaries as described, "
+        "and writes each structure to a descriptive .cif file in the current working directory using ase.io.write.\n\n"
+        f"Targets:\n{plan}"
+    )
+    rag_res = rag_tool(query)
+    answer = rag_res.get("answer", "") or ""
+    code = extract_code(answer)
+    return {"rag_answer": answer, "generated_code": code}
+
+
+def run_generated_code(state: S) -> S:
+    """Execute the generated code once and capture outputs."""
+    code = state.get("generated_code", "")
+    if not code:
+        return {"run_stdout": "", "run_stderr": "No code generated.", "run_rc": 1}
+    stdout, stderr, rc = run_code(code)
+    return {"run_stdout": stdout, "run_stderr": stderr, "run_rc": rc}
+
+
+def build_graph():
+    g = StateGraph(S)
+    g.add_node("load_paper", load_paper)
+    g.add_node("plan_targets", plan_targets)
+    g.add_node("synthesize_code", synthesize_code)
+    g.add_node("run_generated_code", run_generated_code)
+
+    g.add_edge(START, "load_paper")
+    g.add_edge("load_paper", "plan_targets")
+    g.add_edge("plan_targets", "synthesize_code")
+    g.add_edge("synthesize_code", "run_generated_code")
+    g.add_edge("run_generated_code", END)
+
+    return g.compile()
+
+
+# Convenience entry to run with a provided state
+def run_graph(paper_path: str, user_notes: Optional[str] = None, *, plan_model: Optional[str] = None, code_model: Optional[str] = None) -> S:
+    graph = build_graph()
+    init_state: S = {"paper_path": paper_path}
+    if user_notes:
+        init_state["user_notes"] = user_notes
+    if plan_model:
+        init_state["plan_model"] = plan_model
+    if code_model:
+        init_state["code_model"] = code_model
+    out = {}
+    for event in graph.stream(init_state):
+        out.update(list(event.values())[-1])
+    return out  # final state delta

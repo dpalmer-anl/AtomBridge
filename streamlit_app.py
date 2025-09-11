@@ -1,0 +1,397 @@
+import os
+import time
+from pathlib import Path
+import streamlit as st
+
+from src.graph import load_paper, plan_targets, synthesize_code, run_generated_code
+from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt
+from src.create_ASE_RAG import RAG_ASE
+
+
+UPLOAD_DIR = Path("_uploads")
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+def save_uploaded_pdf(uploaded_file) -> str:
+    dest = UPLOAD_DIR / uploaded_file.name
+    with open(dest, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return str(dest)
+
+
+def list_papers_dir() -> list[str]:
+    papers = []
+    pdir = Path("papers")
+    if pdir.exists():
+        for p in sorted(pdir.glob("*.pdf")):
+            papers.append(str(p))
+    return papers
+
+
+def run_pipeline_stepwise(pdf_path: str, notes: str | None, do_exec: bool, plan_model: str, code_model: str) -> dict:
+    state: dict = {"paper_path": pdf_path, "plan_model": plan_model, "code_model": code_model}
+    state.update(load_paper(state))
+    if notes:
+        state["user_notes"] = notes
+    state.update(plan_targets(state))
+    state.update(synthesize_code(state))
+    if do_exec:
+        state.update(run_generated_code(state))
+    return state
+
+
+def generate_and_fix_code(user_prompt: str, paper_text: str, code_model: str, max_iters: int = 3):
+    """Use ASE RAG (code_model) to generate code. If it errors, loop with error context.
+    Returns dict with keys: code, stdout, stderr, rc, iterations, history (list of dicts).
+    """
+    rag_tool = RAG_ASE(model_name=code_model)
+
+    history = []
+    last_code = ""
+    last_stdout = ""
+    last_stderr = ""
+    last_rc = 1
+
+    for i in range(max_iters):
+        if i == 0:
+            query = (
+                "Write Python code that constructs ase.Atoms objects for the task below, "
+                "creates supercells/defects/GBs as requested, and writes each to .cif via ase.io.write.\n"
+                "Only return a single fenced Python code block.\n\n"
+                f"Task: {user_prompt}\n\n"
+                "Paper context (may contain targets and lattice hints):\n"
+                f"{paper_text[:8000]}\n"
+            )
+        else:
+            query = (
+                "The previous generated code failed. Here is the error. Fix the code.\n"
+                "Return only a single fenced Python code block that can run as-is.\n\n"
+                f"Error:\n{last_stderr[:4000]}\n\n"
+                f"Original task: {user_prompt}\n"
+            )
+
+        rag_res = rag_tool(query)
+        answer = rag_res.get("answer", "") or ""
+        code = extract_code(answer)
+        stdout, stderr, rc = run_code(code)
+
+        history.append({
+            "iteration": i + 1,
+            "query": query,
+            "answer": answer,
+            "code": code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "rc": rc,
+        })
+
+        last_code, last_stdout, last_stderr, last_rc = code, stdout, stderr, rc
+        if rc == 0:
+            break
+
+    return {
+        "code": last_code,
+        "stdout": last_stdout,
+        "stderr": last_stderr,
+        "rc": last_rc,
+        "iterations": len(history),
+        "history": history,
+    }
+
+
+st.set_page_config(page_title="Atombridge", layout="wide")
+st.title("TEM → CIF")
+st.caption("Run the minimal pipeline without using the terminal.")
+
+with st.sidebar:
+    st.header("Environment")
+    key_present = bool(os.getenv("GOOGLE_API_KEY"))
+    st.write("GOOGLE_API_KEY:", "✅ set" if key_present else "❌ missing")
+    api_key_input = st.text_input("Enter API key (not saved)", type="password", help="Used only for this session")
+    if st.button("Use key for this session"):
+        if api_key_input.strip():
+            os.environ["GOOGLE_API_KEY"] = api_key_input.strip()
+            st.success("API key set for this session.")
+            key_present = True
+        else:
+            st.warning("Please enter a non-empty key.")
+    st.divider()
+    st.markdown("- Ensure ASE is installed locally.\n- First run may build a local Chroma DB.")
+    st.divider()
+    st.subheader("Mode")
+    mode = st.selectbox(
+        "Choose a mode",
+        options=["Balanced (recommended)", "Accurate (slower)", "Fast (cheaper)"],
+        index=0,
+        help="Balanced uses Flash for planning and Pro for code. Accurate uses Pro for both. Fast uses Flash for both.",
+    )
+
+    # Map mode → models
+    if mode.startswith("Balanced"):
+        plan_model = "gemini-2.5-flash"
+        code_model = "gemini-2.5-pro"
+    elif mode.startswith("Accurate"):
+        plan_model = "gemini-2.5-pro"
+        code_model = "gemini-2.5-pro"
+    else:  # Fast
+        plan_model = "gemini-2.5-flash"
+        code_model = "gemini-2.5-flash"
+
+    with st.expander("Advanced model settings"):
+        plan_model = st.selectbox(
+            "Planning model",
+            options=["gemini-2.5-flash", "gemini-2.5-pro"],
+            index=["gemini-2.5-flash", "gemini-2.5-pro"].index(plan_model),
+            help="Used for extracting targets/plan from the paper",
+        )
+        code_model = st.selectbox(
+            "Codegen model",
+            options=["gemini-2.5-pro", "gemini-2.5-flash"],
+            index=["gemini-2.5-pro", "gemini-2.5-flash"].index(code_model),
+            help="Used by ASE RAG to generate Python code",
+        )
+
+st.subheader("Select a paper")
+source = st.radio("PDF source", ["Upload", "From papers/"], horizontal=True)
+
+pdf_path: str | None = None
+if source == "Upload":
+    up = st.file_uploader("Upload a PDF", type=["pdf"])
+    if up is not None:
+        pdf_path = save_uploaded_pdf(up)
+        st.success(f"Saved to {pdf_path}")
+else:
+    options = list_papers_dir()
+    pdf_path = st.selectbox("Choose from papers/", options) if options else None
+    if not options:
+        st.info("No PDFs found in papers/ directory.")
+
+if "paper_text" not in st.session_state:
+    st.session_state.paper_text = None
+if "suggested_prompts" not in st.session_state:
+    st.session_state.suggested_prompts = []
+if "conversation" not in st.session_state:
+    st.session_state.conversation = []  # list of {role: user/assistant, content: str}
+
+analyze = st.button("Analyze Paper & Suggest Prompts")
+if analyze:
+    if not pdf_path:
+        st.error("Please provide a PDF (upload or pick from papers/)")
+        st.stop()
+    with st.spinner("Reading paper and proposing prompts…"):
+        try:
+            # Reuse the graph helper to parse the paper
+            state = {"paper_path": pdf_path}
+            st.session_state.paper_text = load_paper(state)["paper_text"]
+            st.session_state.suggested_prompts = suggest_prompts_from_paper(
+                st.session_state.paper_text, model_name=plan_model
+            )
+        except Exception as e:
+            st.error(f"Failed to analyze paper: {e}")
+            st.stop()
+
+if st.session_state.suggested_prompts:
+    st.subheader("Suggested Prompts (click to run)")
+    btn_cols = st.columns(len(st.session_state.suggested_prompts))
+    for i, (c, sp) in enumerate(zip(btn_cols, st.session_state.suggested_prompts)):
+        with c:
+            if st.button(sp, key=f"suggest_{i}"):
+                # Put into prompt box and run full pipeline automatically
+                st.session_state["prompt_input"] = sp
+                st.session_state["auto_exec"] = True
+                st.rerun()
+else:
+    st.caption("Click 'Analyze Paper & Suggest Prompts' to get suggestions, or type your own below.")
+
+st.subheader("Constraints (optional)")
+with st.expander("Specify constraints from TEM/paper"):
+    comp = st.text_input("Composition (formula)", placeholder="e.g., MoS2 or LiCoO2")
+    sg = st.text_input("Space group (symbol or number)", placeholder="e.g., P6_3/mmc or 194")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        a_val = st.number_input("a (Å)", min_value=0.0, value=0.0, step=0.01)
+        alpha_val = st.number_input("alpha (°)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
+    with c2:
+        b_val = st.number_input("b (Å)", min_value=0.0, value=0.0, step=0.01)
+        beta_val = st.number_input("beta (°)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
+    with c3:
+        c_val = st.number_input("c (Å)", min_value=0.0, value=0.0, step=0.01)
+        gamma_val = st.number_input("gamma (°)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
+
+    d_text = st.text_area("d-spacings (Å, comma or space separated)", placeholder="e.g., 2.46, 1.42, 1.23")
+    sc1, sc2, sc3 = st.columns(3)
+    with sc1:
+        scx = st.number_input("Supercell Nx", min_value=1, value=1, step=1)
+    with sc2:
+        scy = st.number_input("Supercell Ny", min_value=1, value=1, step=1)
+    with sc3:
+        scz = st.number_input("Supercell Nz", min_value=1, value=1, step=1)
+
+    defect_opts = ["vacancy", "substitution", "interstitial", "antisite", "dopant"]
+    defects = st.multiselect("Defects", options=defect_opts, default=[])
+    defect_details = st.text_area("Defect details", placeholder="e.g., S vacancy at 1% in 2x2 supercell")
+
+    gb = st.checkbox("Include grain boundary")
+    gb_desc = st.text_input("Grain boundary description", disabled=not gb, placeholder="e.g., tilt GB ~5° along [10-10]")
+
+notes = st.text_area(
+    "Your prompt (optional)",
+    key="prompt_input",
+    placeholder="e.g., Extract all structures and write CIFs; include 2x2 supercells and S vacancy variants.",
+)
+
+# Build constraints string
+parsed_d = []
+if d_text.strip():
+    try:
+        # split by comma or whitespace
+        for tok in d_text.replace(",", " ").split():
+            parsed_d.append(float(tok))
+    except Exception:
+        parsed_d = [s for s in d_text.replace(",", " ").split() if s]
+
+constraints = {
+    "composition": comp.strip() or None,
+    "space_group": sg.strip() or None,
+    "a": a_val or None,
+    "b": b_val or None,
+    "c": c_val or None,
+    "alpha": alpha_val or None,
+    "beta": beta_val or None,
+    "gamma": gamma_val or None,
+    "d_spacings": parsed_d,
+    "supercell": (int(scx), int(scy), int(scz)),
+    "defects": defects,
+    "defect_details": defect_details.strip() or None,
+    "grain_boundary": bool(gb),
+    "gb_description": gb_desc.strip() if gb else None,
+}
+constraints_text = build_constraints_prompt(constraints)
+
+final_prompt = (notes or "").strip()
+if constraints_text:
+    final_prompt = (final_prompt + "\n\nConstraints:\n" + constraints_text).strip()
+if not final_prompt:
+    st.caption("Provide a prompt or analyze the paper to pick a suggestion, and optionally add constraints.")
+
+col1, col2 = st.columns(2)
+with col1:
+    dry = st.button("Plan & Generate Code (no exec)")
+with col2:
+    full = st.button("Run Full Pipeline (exec code)")
+
+auto_exec = bool(st.session_state.get("auto_exec"))
+if auto_exec and not pdf_path:
+    st.error("Please provide a PDF (upload or pick from papers/) before using a suggested prompt.")
+    st.session_state["auto_exec"] = False
+
+if (dry or full or auto_exec):
+    if not pdf_path:
+        st.error("Please provide a PDF (upload or pick from papers/)")
+        st.stop()
+    do_exec = bool(full or auto_exec)
+    start_ts = time.time()
+    with st.spinner("Running pipeline… this may take a moment on first run"):
+        try:
+            # If user gave a direct prompt, use generate_and_fix_code; otherwise run the graph path
+            if final_prompt:
+                # Plan summary (optional) using plan_targets, to enrich context
+                state = {"paper_path": pdf_path}
+                state.update(load_paper(state))
+                if st.session_state.paper_text is None:
+                    st.session_state.paper_text = state.get("paper_text")
+                # Use iterative codegen + fix
+                result = generate_and_fix_code(
+                    user_prompt=final_prompt,
+                    paper_text=st.session_state.paper_text or "",
+                    code_model=code_model,
+                    max_iters=3 if do_exec else 1,
+                )
+                # If not executing, do not run; just show the code produced in first iteration
+                if not do_exec:
+                    result["rc"] = None
+            else:
+                result = run_pipeline_stepwise(pdf_path, None, do_exec, plan_model, code_model)
+        except Exception as e:
+            st.error(f"Pipeline error: {e}")
+            st.stop()
+    # Clear auto-exec after run
+    if auto_exec:
+        st.session_state["auto_exec"] = False
+
+    st.success("Done")
+    if "target_plan" in result:
+        st.subheader("Target Plan")
+        st.write(result.get("target_plan", "(none)"))
+
+    st.subheader("Generated Code")
+    code = (result.get("generated_code") or result.get("code") or "")
+    if code:
+        st.code(code, language="python")
+        st.download_button(
+            "Download generated_ase.py",
+            data=code,
+            file_name="generated_ase.py",
+            mime="text/x-python",
+        )
+    else:
+        st.info("No code generated.")
+
+    if do_exec:
+        st.subheader("Execution Output")
+        st.write("Return code:", result.get("run_rc") if "run_rc" in result else result.get("rc"))
+        with st.expander("STDOUT"):
+            st.text(result.get("run_stdout") or result.get("stdout") or "")
+        with st.expander("STDERR"):
+            st.text(result.get("run_stderr") or result.get("stderr") or "")
+
+        st.subheader("Generated CIF Files (recent)")
+        # List CIFs modified after start_ts
+        cif_files = []
+        for p in Path(".").glob("*.cif"):
+            try:
+                if os.path.getmtime(p) >= start_ts - 1:
+                    cif_files.append(p)
+            except Exception:
+                continue
+        if cif_files:
+            for p in cif_files:
+                with open(p, "rb") as f:
+                    st.download_button(
+                        f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
+                    )
+        else:
+            st.info("No new CIF files detected. Check STDERR for issues.")
+
+st.divider()
+st.subheader("Conversation")
+for m in st.session_state.conversation:
+    role = m.get("role", "assistant")
+    st.markdown(f"**{role.title()}:** {m.get('content','')}")
+
+user_msg = st.text_input("Ask a follow-up or refine the request")
+colA, colB = st.columns(2)
+with colA:
+    send = st.button("Send")
+with colB:
+    regen = st.button("Regenerate Code from Conversation")
+
+if send and user_msg.strip():
+    st.session_state.conversation.append({"role": "user", "content": user_msg.strip()})
+
+if regen:
+    # Build a consolidated prompt from the conversation and any suggested choice
+    convo_text = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.conversation])
+    extra = ("\n\nConstraints:\n" + constraints_text) if constraints_text else ""
+    combined_prompt = (final_prompt or "Generate CIFs from the paper") + extra + "\n" + convo_text
+    with st.spinner("Regenerating code using conversation context…"):
+        result = generate_and_fix_code(
+            user_prompt=combined_prompt,
+            paper_text=st.session_state.paper_text or "",
+            code_model=code_model,
+            max_iters=3,
+        )
+    st.session_state.conversation.append({
+        "role": "assistant",
+        "content": f"Regenerated code (rc={result.get('rc')}), see above for outputs."
+    })

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+.venv/
+
+# Streamlit uploads/cache
+_uploads/
+
+# Chroma DB
+chroma_ase/
+
+# Generated CIFs and scratch outputs
+*.cif
+cif_files/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

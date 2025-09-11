@@ -6,13 +6,13 @@ from pathlib import Path
 from PIL import Image
 import io
 
-# --- Configuration ---
+# Configuration
 pdf_path = Path("0D-ZnO.pdf")
 output_folder = Path("Output_TEM/ZnO_Output")
 output_folder.mkdir(parents=True, exist_ok=True)
 csv_path = output_folder / "figures_and_captions.csv"
 
-# --- Main function to process the PDF ---
+# Main function to process the PDF
 def process_pdf(doc):
     """
     Processes the PDF to extract and match figures with their captions.
@@ -74,7 +74,7 @@ def process_pdf(doc):
                 
     return figure_data
 
-# --- Main execution ---
+# Main execution
 try:
     doc = fitz.open(str(pdf_path))
     figure_data = process_pdf(doc)

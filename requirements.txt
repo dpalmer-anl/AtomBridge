@@ -21,7 +21,8 @@ scikit-learn>=1.4,<2
 scikit-image>=0.22,<0.25
 ase>=3.22.1,<4
 # M3GNET + pymatgen for relaxation validation
-pymatgen==2024.7.10
+# Relax pin so pip can resolve platform wheels more easily
+pymatgen>=2023.11,<2025
 m3gnet==0.2.4
 tensorflow==2.12.1
 spglib>=2.0.2

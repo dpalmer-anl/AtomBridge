@@ -793,6 +793,9 @@ elif st.session_state.last_result:
     if lr.get("target_plan"):
         st.subheader("Target Plan (last run)")
         st.write(lr.get("target_plan"))
+    if lr.get("mp_validation"):
+        st.subheader("Materials Project Validation (last run)")
+        st.json(lr.get("mp_validation"))
     if st.session_state.last_cifs:
         st.subheader("Generated CIF Files (last run)")
         # Overlap check summary for last run

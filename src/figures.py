@@ -101,6 +101,130 @@ def extract_figures(pdf_path: str, out_dir: str = "_uploads/fig_extract") -> Lis
     return figures
 
 
+def extract_figures_v2(pdf_path: str, out_dir: str = "_uploads/fig_extract") -> List[Figure]:
+    """Improved figure extractor inspired by tem_image/extractfigures.py.
+    - Merges nearby image regions to get full composite figures
+    - Attempts subfigure segmentation with adaptive threshold + contour merge
+    - Associates nearest caption text below each figure
+    Returns a list of Figure objects (top-level figures only; subfigures are returned as separate Figures too).
+    """
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    figures: List[Figure] = []
+
+    def _merge_close_bboxes(bboxes: List[Tuple[int, int, int, int]], threshold: int = 15):
+        if not bboxes:
+            return []
+        rects = [fitz.Rect(b) for b in bboxes]
+        while True:
+            merged = False
+            new_rects = []
+            current = rects[0]
+            for r in rects[1:]:
+                inflated = current + (-threshold, -threshold, threshold, threshold)
+                if r.intersects(inflated):
+                    current.include_rect(r)
+                    merged = True
+                else:
+                    new_rects.append(current)
+                    current = r
+            new_rects.append(current)
+            if not merged:
+                rects = new_rects
+                break
+            rects = new_rects
+        return [(int(r.x0), int(r.y0), int(r.x1 - r.x0), int(r.y1 - r.y0)) for r in rects]
+
+    def _segment_subfigures(image: Image.Image) -> List[Tuple[int, int, int, int]]:
+        try:
+            import cv2  # type: ignore
+            import numpy as np  # type: ignore
+        except Exception:
+            return []
+        img_cv = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2GRAY)
+        H, W = img_cv.shape
+        blurred = cv2.GaussianBlur(img_cv, (5, 5), 0)
+        thr = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 25, 2)
+        contours, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        min_area = W * H * 0.01
+        raw = [cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > min_area]
+        merged = _merge_close_bboxes(raw)
+        out: List[Tuple[int, int, int, int]] = []
+        min_area_final = W * H * 0.02
+        max_area_final = W * H * 0.95
+        pad = 10
+        for (x, y, w, h) in merged:
+            if min_area_final < w * h < max_area_final:
+                xp = max(0, x - pad); yp = max(0, y - pad)
+                wp = min(W - xp, w + 2 * pad); hp = min(H - yp, h + 2 * pad)
+                out.append((xp, yp, wp, hp))
+        out.sort(key=lambda b: (b[1], b[0]))
+        return out
+
+    doc = fitz.open(pdf_path)
+    for pi, page in enumerate(doc):
+        data = page.get_text("dict")
+        page_txt = page.get_text("text") or ""
+        blocks = data.get("blocks", [])
+        text_blocks = [b for b in blocks if b.get("type") == 0]
+
+        # candidates from image xrefs
+        img_bboxes = []
+        for img in page.get_images(full=True):
+            try:
+                r = page.get_image_bbox(img)
+                if r and r.is_valid and r.width > 50 and r.height > 50:
+                    img_bboxes.append((int(r.x0), int(r.y0), int(r.x1 - r.x0), int(r.y1 - r.y0)))
+            except Exception:
+                continue
+        merged_bboxes = _merge_close_bboxes(img_bboxes)
+
+        for bi, (x, y, w, h) in enumerate(merged_bboxes):
+            try:
+                bbox = fitz.Rect(x, y, x + w, y + h)
+                pix = page.get_pixmap(clip=bbox, dpi=300)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                # associate nearest caption below
+                cap = ""
+                best = 1e9
+                for tb in text_blocks:
+                    tbbox = tb.get("bbox")
+                    if not tbbox:
+                        continue
+                    tx0, ty0, tx1, ty1 = tbbox
+                    if ty0 >= y + h and not (tx1 < x or tx0 > x + w):
+                        d = ty0 - (y + h)
+                        if d < best:
+                            best = d
+                            cap = "".join(span.get("text", "") for line in tb.get("lines", []) for span in line.get("spans", []))
+
+                # Attempt subfigure segmentation; if more than 1, output separate tiles
+                subs = _segment_subfigures(img)
+                if subs and len(subs) > 1:
+                    for sj, (sx, sy, sw, sh) in enumerate(subs):
+                        tile = img.crop((sx, sy, sx + sw, sy + sh))
+                        fname = f"fig_p{pi+1}_{bi}_{sj}.png"
+                        fpath = str(Path(out_dir) / fname)
+                        tile.save(fpath)
+                        fig = Figure(page_index=pi, image_path=fpath, bbox=(x + sx, y + sy, x + sx + sw, y + sy + sh), caption=(cap or "").strip(), page_text=page_txt)
+                        tem_hits, non_hits = _score_tem_relevance(fig.caption + "\n" + fig.page_text)
+                        fig.is_tem = tem_hits > 0 and tem_hits >= non_hits
+                        fig.tem_score = tem_hits - non_hits
+                        figures.append(fig)
+                else:
+                    fname = f"fig_p{pi+1}_{bi}.png"
+                    fpath = str(Path(out_dir) / fname)
+                    img.save(fpath)
+                    fig = Figure(page_index=pi, image_path=fpath, bbox=(x, y, x + w, y + h), caption=(cap or "").strip(), page_text=page_txt)
+                    tem_hits, non_hits = _score_tem_relevance(fig.caption + "\n" + fig.page_text)
+                    fig.is_tem = tem_hits > 0 and tem_hits >= non_hits
+                    fig.tem_score = tem_hits - non_hits
+                    figures.append(fig)
+            except Exception:
+                continue
+
+    return figures
+
+
 def crop_image(image_path: str, box: Tuple[int, int, int, int], out_dir: str = "_uploads/crops") -> str:
     """Crop the image to box=(x, y, w, h) and save to out_dir; return path."""
     Path(out_dir).mkdir(parents=True, exist_ok=True)

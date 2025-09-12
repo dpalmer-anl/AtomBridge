@@ -258,8 +258,8 @@ def generate_and_fix_code_v2(user_prompt: str, paper_text: str, code_model: str,
 
 
 st.set_page_config(page_title="Atombridge", layout="wide")
-st.title("TEM to CIF")
-st.caption("Run the minimal pipeline without using the terminal.")
+st.title("Atombridge")
+st.caption("STEM to CIF")
 
 with st.sidebar:
     st.header("Environment")
@@ -770,7 +770,14 @@ with colF1:
         else:
             with st.spinner("Extracting figures and captions..."):
                 try:
-                    figs = extract_figures(pdf_path)
+                    # Try improved extractor first; fall back to baseline
+                    try:
+                        from src.figures import extract_figures_v2 as _extract_v2
+                        figs = _extract_v2(pdf_path)
+                        if not figs:
+                            raise RuntimeError("no_figs_v2")
+                    except Exception:
+                        figs = extract_figures(pdf_path)
                     st.session_state.figures = figs
                     st.session_state.figure_idx = 0
                     st.session_state.figures_extracted = True
@@ -926,14 +933,45 @@ if fig is not None:
             except Exception as e:
                 st.error(f"Detection failed: {e}")
 
+    # STEM lattice analysis using peak-based method (nm per pixel input)
+    if crop_path:
+        st.subheader("STEM lattice analysis")
+        nm_per_px = st.number_input("Scale (nm per pixel)", min_value=0.0001, max_value=10.0, value=0.05, step=0.005, format="%.4f")
+        c1, c2 = st.columns(2)
+        with c1:
+            run_lattice = st.button("Analyze lattice (STEM)")
+        with c2:
+            quick_min_cif = st.button("Write minimal CIF from lattice")
+        if run_lattice or quick_min_cif:
+            try:
+                from src.stem_analysis import measure_lattice_vectors, minimal_cif_from_lattice
+                res_lat = measure_lattice_vectors(crop_path, nm_per_px)
+                st.session_state["last_lattice"] = res_lat
+                st.success(f"a={res_lat['a_nm']:.4f} nm, b={res_lat['b_nm']:.4f} nm, gamma={res_lat['gamma_deg']:.2f} deg; atoms={res_lat['n_atoms']}")
+                if res_lat.get("overlay_path"):
+                    st.image(res_lat["overlay_path"], caption="Lattice detection overlay", use_container_width=True)
+                if quick_min_cif:
+                    out_name = Path(crop_path).with_suffix("").name + "_lattice.cif"
+                    out_path = minimal_cif_from_lattice(res_lat['a_nm'], res_lat['b_nm'], res_lat['gamma_deg'], out_name)
+                    st.success(f"Wrote minimal CIF: {out_path}")
+                    with open(out_path, "rb") as f:
+                        st.download_button(f"Download {Path(out_path).name}", data=f, file_name=Path(out_path).name, mime="chemical/x-cif")
+            except Exception as e:
+                st.warning(f"Lattice analysis failed: {e}")
+
     coords = st.session_state.fig_coords.get(crop_path or (fig.image_path if fig else None))
     # Button to create CIF from cropped region context
     if crop_path and st.button("Create CIF"):
         # Build focused prompt using caption and page text
         context = (fig.caption or "") + "\n\n" + (fig.page_text or "")
+        lattice_hint = ""
+        if st.session_state.get("last_lattice"):
+            lat = st.session_state["last_lattice"]
+            lattice_hint = (f"\n\nImage-derived lattice parameters (nm): a={lat['a_nm']:.4f}, b={lat['b_nm']:.4f}, "
+                            f"gamma={lat['gamma_deg']:.2f} deg. Use these as strong constraints.")
         focus_prompt = (
             "Focus on the structure shown in the selected subfigure/crop. "
-            "Use the caption and surrounding page text as context:\n" + context[:4000]
+            "Use the caption and surrounding page text as context:\n" + context[:4000] + lattice_hint
         )
         user_prompt = (final_prompt + "\n\n" + focus_prompt).strip()
         with st.spinner("Generating ASE code and CIF from selected region..."):

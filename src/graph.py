@@ -1,4 +1,4 @@
-import os
+﻿import os
 from typing import Optional
 from typing_extensions import TypedDict
 
@@ -11,7 +11,7 @@ from .create_ASE_RAG import RAG_ASE
 
 
 class S(TypedDict, total=False):
-    """Pipeline state for TEM→unit cell→ASE→CIF flow."""
+    """Pipeline state for TEMâ†’unit cellâ†’ASEâ†’CIF flow."""
     paper_path: str
     paper_text: str
     user_notes: Optional[str]
@@ -27,7 +27,7 @@ class S(TypedDict, total=False):
 
 
 def _get_llm(model_name: str):
-    return init_chat_model(model_name, model_provider="google_genai")
+    return init_chat_model(model_name, model_provider="google_genai", max_retries=0)
 
 
 def load_paper(state: S) -> S:
@@ -138,3 +138,4 @@ def run_graph(paper_path: str, user_notes: Optional[str] = None, *, plan_model: 
     for event in graph.stream(init_state):
         out.update(list(event.values())[-1])
     return out  # final state delta
+

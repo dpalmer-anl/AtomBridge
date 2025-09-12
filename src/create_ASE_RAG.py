@@ -1,4 +1,4 @@
-"""
+﻿"""
 langgraph_rag_ase_local.py
 
 If ASE is installed locally, use its source directory for RAG.
@@ -111,7 +111,7 @@ def build_vector_store_and_retriever(docs: List[Dict]):
 def make_qa_chain(retriever, model_name: str = "gemini-2.5-pro"):
     from langchain.chat_models import init_chat_model
     from langchain.chains import RetrievalQA
-    llm = init_chat_model(model_name, model_provider="google_genai")
+    llm = init_chat_model(model_name, model_provider="google_genai", max_retries=0)
     qa = RetrievalQA.from_chain_type(
         llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=True
     )
@@ -171,6 +171,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 

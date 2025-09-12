@@ -1,4 +1,4 @@
-import re
+﻿import re
 import subprocess
 import tempfile
 from langchain_community.document_loaders import PyPDFLoader
@@ -33,7 +33,7 @@ def suggest_prompts_from_paper(paper_text: str, model_name: str = "gemini-2.5-fl
     """Use an LLM to propose 3 likely prompts based on the paper.
     Returns a list of 3 concise, user-facing prompts.
     """
-    llm = init_chat_model(model_name, model_provider="google_genai")
+    llm = init_chat_model(model_name, model_provider="google_genai", max_retries=0)
     prompt = (
         "You analyze a materials science paper containing TEM-based structure discussion.\n"
         "Propose three practical user prompts to generate CIFs with ASE based on this paper.\n"
@@ -71,7 +71,7 @@ def build_constraints_prompt(constraints: dict) -> str:
     Expected keys (all optional):
     - composition: str
     - space_group: str|int
-    - a,b,c: float (Å)
+    - a,b,c: float (Ã…)
     - alpha,beta,gamma: float (deg)
     - d_spacings: list[float]
     - supercell: tuple[int,int,int]
@@ -91,24 +91,24 @@ def build_constraints_prompt(constraints: dict) -> str:
     if any(v for v in abc):
         a, b, c = abc
         parts = []
-        if a: parts.append(f"a={a} Å")
-        if b: parts.append(f"b={b} Å")
-        if c: parts.append(f"c={c} Å")
+        if a: parts.append(f"a={a} Ã…")
+        if b: parts.append(f"b={b} Ã…")
+        if c: parts.append(f"c={c} Ã…")
         if parts:
             lines.append("Lattice constants: " + ", ".join(parts))
     if any(v for v in angles):
         al, be, ga = angles
         parts = []
-        if al: parts.append(f"alpha={al}°")
-        if be: parts.append(f"beta={be}°")
-        if ga: parts.append(f"gamma={ga}°")
+        if al: parts.append(f"alpha={al}Â°")
+        if be: parts.append(f"beta={be}Â°")
+        if ga: parts.append(f"gamma={ga}Â°")
         if parts:
             lines.append("Lattice angles: " + ", ".join(parts))
     # d-spacings
     dvals = constraints.get("d_spacings") or []
     if dvals:
         try:
-            d_fmt = ", ".join(f"{float(x)} Å" for x in dvals)
+            d_fmt = ", ".join(f"{float(x)} Ã…" for x in dvals)
         except Exception:
             d_fmt = ", ".join(map(str, dvals))
         lines.append(f"Observed d-spacings: {d_fmt}")
@@ -129,3 +129,4 @@ def build_constraints_prompt(constraints: dict) -> str:
     if not lines:
         return ""
     return "\n".join(lines)
+

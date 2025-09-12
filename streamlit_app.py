@@ -4,7 +4,7 @@ from pathlib import Path
 import streamlit as st
 
 from src.graph import load_paper, plan_targets, synthesize_code, run_generated_code
-from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt
+from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt, is_llm_quota_error
 from src.create_ASE_RAG import RAG_ASE
 from src.mp_api import mp_api_validate_from_text
 from src.figures import extract_figures, run_tem_to_atom_coords
@@ -621,6 +621,22 @@ if st.session_state.figures:
                         st.warning("Outside margin of error â€” consider refining constraints or code.")
                 except Exception as e:
                     st.error(f"Comparison failed: {e}")
+# Default ""search all"" prompt text for non-coders
+DEFAULT_SEARCH_ALL_PROMPT = (
+    "I am interested in investigating the structures defined in this paper using atomistic simulation. "
+    "This paper contains TEM results with structural information. Determine the structures of interest in this paper. "
+    "The structures of interest should be related to the main hypothesis of the paper. "
+    "Next, construct ase.atoms objects for the systems of interest. "
+    "Write a python script that constructs the ase.atoms objects for the systems of interest. "
+    "This python script should create each ase.atoms object and write the object to a CIF file in the current working directory with a descriptive filename and .cif extension using the ase.io.write(<filename>,atoms_object,format='vasp'). "
+    "Note these ase.atoms objects will be the starting point of a simulation (either DFT or MD). "
+    "In the event there are certain degrees of freedom that are unclear or poorly defined in the paper, it may be useful to produce structures that sweep over several reasonable values."
+)
+
+if \"prompt_input\" not in st.session_state:
+    st.session_state.prompt_input = DEFAULT_SEARCH_ALL_PROMPT
+
+
 
 
 

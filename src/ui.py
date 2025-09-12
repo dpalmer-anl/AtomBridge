@@ -2,12 +2,28 @@ import os
 import shutil
 import base64
 import mimetypes
-
+from pathlib import Path
+import fitz  # PyMuPDF
 import streamlit as st
 import glob
 import pandas as pd
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.spatial import KDTree
+from sklearn.cluster import DBSCAN
+from skimage.feature import peak_local_max
 
-from figures_and_captions import process_pdf
+import extractfigures as legacy
+
+# Import the interactive measurement utilities from measureTEM
+from measureTEM import (
+    # get_scale_from_user,
+    # custom_select_roi,
+    get_scale_from_user_streamlit,
+    measure_atomic_spacing_realspace,
+    custom_select_roi_streamlit,
+)
 
 # Helper to build an LLM-ready image payload (bytes + base64 + metadata)
 def build_llm_image_payload(image_path: str, caption: str):
@@ -21,8 +37,8 @@ def build_llm_image_payload(image_path: str, caption: str):
         "filename": os.path.basename(image_path),
         "path": image_path,
         "mime": mime,
-        "bytes": data,          # for APIs that accept raw bytes
-        "base64": b64,          # for APIs that require base64
+        "bytes": data,
+        "base64": b64,
         "caption": caption,
     }
 
@@ -42,11 +58,20 @@ if "selected_caption" not in st.session_state:
     st.session_state.selected_caption = None
 if "selected_image_payload" not in st.session_state:
     st.session_state.selected_image_payload = None
+if "pixel_to_nm" not in st.session_state:
+    st.session_state.pixel_to_nm = None
+if "roi" not in st.session_state:
+    st.session_state.roi = None
+if "analysis_results" not in st.session_state:
+    st.session_state.analysis_results = None
+# NEW: UI mode flags
+if "scale_mode" not in st.session_state:
+    st.session_state.scale_mode = False
+if "roi_mode" not in st.session_state:
+    st.session_state.roi_mode = False
 
 # File uploader
-uploaded_files = st.file_uploader(
-    "Upload PDF files", type="pdf", accept_multiple_files=True
-)
+uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
 
 # Directory for the output
 outputDirectory = "output"
@@ -61,10 +86,15 @@ llm_type = st.selectbox("Select the model type:", ("GPT-5", "Gemini-2.5-Pro", "C
 
 # Process PDFs
 if uploaded_files and st.button("Process PDFs"):
-    # Clean image output to avoid mixing old and new files
     if os.path.isdir(image_output_directory):
         shutil.rmtree(image_output_directory)
     os.makedirs(image_output_directory, exist_ok=True)
+
+    legacy.output_folder = Path(image_output_directory)
+
+    if not hasattr(legacy, "process_pdf") or not callable(getattr(legacy, "process_pdf")):
+        st.error("old_extractfigures.process_pdf is not available. Please ensure old_extractfigures.py contains a process_pdf(doc) function.")
+        st.stop()
 
     dfs = []
     for uf in uploaded_files:
@@ -72,9 +102,15 @@ if uploaded_files and st.button("Process PDFs"):
         with open(file_path, "wb") as f:
             f.write(uf.getbuffer())
 
-        df = process_pdf(file_path, image_output_directory)
-        if df is not None and not df.empty:
-            dfs.append(df)
+        try:
+            with fitz.open(file_path) as doc:
+                records = legacy.process_pdf(doc)
+        except Exception as e:
+            st.exception(e)
+            continue
+
+        if records:
+            dfs.append(pd.DataFrame(records))
 
     if dfs:
         figure_data = pd.concat(dfs, ignore_index=True)
@@ -84,7 +120,6 @@ if uploaded_files and st.button("Process PDFs"):
         st.session_state.figure_data = figure_data
         st.session_state.images = figure_data["figure_path_files"].tolist()
         st.session_state.captions = figure_data["caption"].tolist()
-        # reset any previous selection
         st.session_state.selected_image_path = None
         st.session_state.selected_caption = None
         st.session_state.selected_image_payload = None
@@ -109,38 +144,56 @@ if st.session_state.figure_data is not None and len(st.session_state.images) > 0
 
     selected_index = st.slider("Select an image", 0, len(images) - 1, 0)
     st.image(images[selected_index], caption=captions[selected_index], use_container_width=True)
+    current_image_path = images[selected_index]
 
     # Select current image for downstream LLM processing
     if st.button("Use this image for LLM"):
-        st.session_state.selected_image_path = images[selected_index]
+        st.session_state.selected_image_path = current_image_path
         st.session_state.selected_caption = captions[selected_index]
         st.session_state.selected_image_payload = build_llm_image_payload(
-            images[selected_index], captions[selected_index]
+            current_image_path, captions[selected_index]
         )
-        st.success(f"Selected: {os.path.basename(images[selected_index])} for LLM processing.")
-else:
-    st.info("Upload PDFs and click 'Process PDFs' to view and select extracted figures.")
+        st.success(f"Selected: {os.path.basename(current_image_path)} for LLM processing.")
 
-# Display figures if available
-# if st.session_state.figure_data is not None and len(st.session_state.images) > 0:
-#     images = st.session_state.images
-#     captions = st.session_state.captions
+    # Buttons toggle Streamlit-native interactive modes
+    if st.button("Measure Scale Bar"):
+        st.session_state.scale_mode = True
+    if st.button("Select ROI"):
+        st.session_state.roi_mode = True
 
-#     selected_index = st.slider("Select an image", 0, len(images) - 1, 0)
-#     st.image(images[selected_index], caption=captions[selected_index], use_container_width=True)
+    # Streamlit-native scale measurement flow
+    if st.session_state.scale_mode:
+        img_gray = cv2.imread(current_image_path, cv2.IMREAD_GRAYSCALE)
+        if img_gray is None:
+            st.error("Failed to load the selected image.")
+        else:
+            ratio = get_scale_from_user_streamlit(img_gray, canvas_key=f"scale_canvas_{selected_index}")
+            if ratio is not None:
+                st.session_state.pixel_to_nm = ratio
+                st.session_state.scale_mode = False
+                st.success(f"Calculated pixel-to-nm ratio: {ratio:.6f}")
 
-#     # Download selected image
-#     try:
-#         with open(images[selected_index], "rb") as fh:
-#             st.download_button(
-#                 label="Download image",
-#                 data=fh.read(),
-#                 file_name=os.path.basename(images[selected_index]),
-#             )
-#     except FileNotFoundError:
-#         st.warning("Selected image file not found on disk.")
-# else:
-#     st.info("Upload PDFs and click 'Process PDFs' to view extracted figures.")
+    # Streamlit-native ROI selection flow
+    if st.session_state.roi_mode:
+        img_gray = cv2.imread(current_image_path, cv2.IMREAD_GRAYSCALE)
+        if img_gray is None:
+            st.error("Failed to load the selected image.")
+        else:
+            roi = custom_select_roi_streamlit(img_gray, canvas_key=f"roi_canvas_{selected_index}")
+            if roi is not None:
+                st.session_state.roi = roi
+                st.session_state.roi_mode = False
+                st.success(f"Selected ROI: {roi}")
+
+    # Analyze the selected ROI when both scale and ROI are available
+    if st.session_state.roi and st.session_state.pixel_to_nm:
+        img_full_gray = cv2.imread(current_image_path, cv2.IMREAD_GRAYSCALE)
+        if img_full_gray is not None:
+            x, y, w, h = st.session_state.roi
+            img_roi_gray = img_full_gray[y:y+h, x:x+w]
+            measure_atomic_spacing_realspace(img_roi_gray, st.session_state.pixel_to_nm)
+        else:
+            st.error("Failed to load the selected image.")
 
 # Preview the selected image payload (for downstream use)
 if st.session_state.selected_image_payload:
@@ -148,9 +201,16 @@ if st.session_state.selected_image_payload:
     st.subheader("Selected image for LLM (prepared)")
     st.write(f"File: {sel['filename']}  |  MIME: {sel['mime']}")
     st.write(f"Caption: {sel['caption']}")
-    # Optional: show again
     st.image(sel["path"], caption="Selected", use_container_width=True)
 
-    # Example stub: you can call your LLM here with sel['bytes'] or sel['base64']
-    # if st.button("Run LLM (stub)"):
-    #     st.info("LLM call not implemented yet.")
+# def get_scale_from_user(image):
+#     # Implementation of scale bar measurement logic
+#     pass
+
+# def custom_select_roi(image):
+#     # Implementation of ROI selection logic
+#     pass
+
+# def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio, original_filename):
+#     # Implementation of atomic spacing measurement logic
+#     pass

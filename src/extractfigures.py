@@ -13,7 +13,7 @@ SUBFIGURE_PADDING = 10 # Pixels to add around each detected subfigure.
 PLOT_WHITESPACE_THRESHOLD = 0.75 # (75%) Figures with more white space than this will be treated as plots.
 
 # --- Configuration ---
-pdf_path = Path("papers/fang-et-al-2024-mechanistic-insights-into-potassium-assistant-thermal-catalytic-oxidation-of-soot-over-single.pdf")
+pdf_path = Path("fang-et-al-2024-mechanistic-insights-into-potassium-assistant-thermal-catalytic-oxidation-of-soot-over-single.pdf")
 output_folder = Path("OutputImages1D_new")
 output_folder.mkdir(parents=True, exist_ok=True)
 csv_path = output_folder / "figures_and_captions.csv"

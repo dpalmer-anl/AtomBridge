@@ -2,6 +2,11 @@
 import time
 from pathlib import Path
 import streamlit as st
+# Avoid cross-drive file watcher exceptions on Windows when external libs write temp files
+try:
+    st.set_option("server.fileWatcherType", "poll")
+except Exception:
+    pass
 # Compatibility shim for streamlit_drawable_canvas on Streamlit>=1.49:
 # Older versions of the canvas lib call streamlit.elements.image.image_to_url,
 # which no longer exists. We provide a drop-in that stores the image in
@@ -462,12 +467,13 @@ if st.session_state.suggested_prompts:
                     # Run quick overlap check on generated CIFs
                     try:
                         from ase.io import read as ase_read
-                        from src.structure_checks import check_atom_distances
-                        bads = []
+                        from src.structure_checks import check_atom_distances, distance_summary
+                        bads, goods = [], []
                         for p in new_cifs:
                             try:
                                 atoms = ase_read(p)
                                 check_atom_distances(atoms)
+                                goods.append((p, distance_summary(atoms)))
                             except Exception as ee:
                                 bads.append((p, str(ee)))
                         if bads:
@@ -478,6 +484,9 @@ if st.session_state.suggested_prompts:
                                     st.code(msg)
                         else:
                             st.success("Atom-overlap check passed for all generated CIFs.")
+                            with st.expander('Overlap check details (min distances)'):
+                                for p, summ in goods:
+                                    st.write(f"{Path(p).name}: min distance = {summ['min_distance']:.3f} Å (cutoff {summ['cutoff']:.2f} Å)")
                     except Exception:
                         pass
                     st.success(f'Completed generation for {gen_count} TEM-linked prompts. Found {len(new_cifs)} CIFs in working directory.')
@@ -498,8 +507,8 @@ if st.session_state.suggested_prompts:
                                     st.download_button(
                                         f'Download {pth.name}', data=f, file_name=pth.name, mime='chemical/x-cif'
                                     )
-                        with st.expander('Optional: Validate these CIFs with M3GNET (slow)'):
-                            if st.button('Run M3GNET relaxation (batch)', key='m3g_batch_recent'):
+                        with st.expander('Optional: Validate stable structure (M3GNET, slow)'):
+                            if st.button('Validate stable structure (batch)', key='m3g_batch_recent'):
                                 try:
                                     from src.structure_checks import validate_m3gnet
                                     for p in new_cifs:
@@ -704,12 +713,13 @@ if (dry or full or auto_exec):
         if cif_files:
             try:
                 from ase.io import read as ase_read
-                from src.structure_checks import check_atom_distances
-                bads = []
+                from src.structure_checks import check_atom_distances, distance_summary
+                bads, goods = [] , []
                 for p in cif_files:
                     try:
                         atoms = ase_read(p)
                         check_atom_distances(atoms)
+                        goods.append((str(p), distance_summary(atoms)))
                     except Exception as ee:
                         bads.append((str(p), str(ee)))
                 if bads:
@@ -720,6 +730,10 @@ if (dry or full or auto_exec):
                             st.code(msg)
                 else:
                     st.success("Atom-overlap check passed for all generated CIFs.")
+                    with st.expander('Overlap check details (min distances)'):
+                        for p, summ in goods:
+                            name = Path(p).name
+                            st.write(f"{name}: min distance = {summ['min_distance']:.3f} Å (cutoff {summ['cutoff']:.2f} Å)")
             except Exception:
                 pass
         if cif_files:
@@ -736,8 +750,8 @@ if (dry or full or auto_exec):
                         st.download_button(
                             f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
                         )
-            with st.expander('Optional: Validate these CIFs with M3GNET (slow)'):
-                if st.button('Run M3GNET relaxation (recent)', key='m3g_exec_recent'):
+            with st.expander('Optional: Validate stable structure (M3GNET, slow)'):
+                if st.button('Validate stable structure (recent)', key='m3g_exec_recent'):
                     try:
                         from src.structure_checks import validate_m3gnet
                         for p in cif_files:
@@ -814,8 +828,8 @@ elif st.session_state.last_result:
                         st.download_button(
                             f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
                         )
-        with st.expander('Optional: Validate last CIFs with M3GNET (slow)'):
-            if st.button('Run M3GNET relaxation (last run)', key='m3g_last'):
+        with st.expander('Optional: Validate stable structure (M3GNET, slow)'):
+            if st.button('Validate stable structure (last run)', key='m3g_last'):
                 try:
                     from src.structure_checks import validate_m3gnet
                     for p_str in st.session_state.last_cifs:
@@ -828,7 +842,7 @@ elif st.session_state.last_result:
                         except Exception as ee:
                             st.write(f"{p.name}: {ee}")
                 except Exception as e:
-                    st.info(f"M3GNET validation not available: {e}")
+                    st.info(f"M3GNET validation not available: {e}. To enable, install 'pymatgen' and 'm3gnet' in your environment.")
     if st.session_state.last_code:
         with st.expander("Show Generated Code (last run)"):
             st.code(st.session_state.last_code, language="python")

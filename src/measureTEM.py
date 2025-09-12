@@ -253,18 +253,18 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
     cv2.arrowedLine(img_with_detections, start_point, end_point_b, (0, 255, 255), 2, line_type=cv2.LINE_AA)
 
     # 9. Display the plot
-    plt.figure(figsize=(18, 6))
-    plt.subplot(1, 3, 1)
-    plt.imshow(img, cmap='gray')
-    plt.title('Original Image ROI')
-    plt.axis('off')
+    plt.figure(figsize=(6, 6))
+    # plt.subplot(1, 3, 1)
+    # plt.imshow(img, cmap='gray')
+    # plt.title('Original Image ROI')
+    # plt.axis('off')
 
-    plt.subplot(1, 3, 2)
-    plt.imshow(img_enhanced, cmap='gray')
-    plt.title('Enhanced Image')
-    plt.axis('off')
+    # plt.subplot(1, 3, 2)
+    # plt.imshow(img_enhanced, cmap='gray')
+    # plt.title('Enhanced Image')
+    # plt.axis('off')
 
-    plt.subplot(1, 3, 3)
+    # plt.subplot(1, 3, 3)
     plt.imshow(cv2.cvtColor(img_with_detections, cv2.COLOR_BGR2RGB))
     plt.title(f'Lattice Vectors Detected')
     plt.axis('off')

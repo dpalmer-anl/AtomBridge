@@ -1,13 +1,17 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.spatial.distance import pdist
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
+from skimage.feature import peak_local_max
 
 # --- Global variables for mouse callback ---
 ref_points = []
 drawing = False
+roi_rect = None
+drawing_roi = False
+resizing_handle = None
+HANDLE_SIZE = 8
 
 def draw_line_callback(event, x, y, flags, param):
     """Mouse callback function to draw a line on the image."""
@@ -20,16 +24,16 @@ def draw_line_callback(event, x, y, flags, param):
 
     elif event == cv2.EVENT_MOUSEMOVE:
         if drawing:
-            # Create a copy to draw the temporary line
+            # Create a copy to draw the temporary line in real-time
             temp_image = image.copy()
-            cv2.line(temp_image, ref_points[0], (x, y), (0, 255, 0), 2)
+            cv2.line(temp_image, ref_points[0], (x, y), (0, 0, 255), 2) # Red line
             cv2.imshow("Draw Scale Bar", temp_image)
 
     elif event == cv2.EVENT_LBUTTONUP:
         ref_points.append((x, y))
         drawing = False
         # Draw the final line on the original image clone
-        cv2.line(image, ref_points[0], ref_points[1], (0, 255, 0), 2)
+        cv2.line(image, ref_points[0], ref_points[1], (0, 0, 255), 2) # Red line
         cv2.imshow("Draw Scale Bar", image)
 
 def get_scale_from_user(image):
@@ -38,19 +42,17 @@ def get_scale_from_user(image):
     to calculate the pixel-to-nm ratio.
     """
     global ref_points
-    # Reset ref_points at the beginning of the function
     ref_points = []
     clone = image.copy()
     window_name = "Draw Scale Bar"
     cv2.namedWindow(window_name)
     
-    # Pass the image clone as a parameter to the callback
     param_dict = {'image': clone}
     cv2.setMouseCallback(window_name, draw_line_callback, param_dict)
 
-    print("INSTRUCTIONS:")
+    print("INSTRUCTIONS (SCALE BAR):")
     print("1. A window will appear with your image.")
-    print("2. Click and drag your mouse to draw a line along the scale bar.")
+    print("2. Click and drag your mouse to draw a red line along the scale bar.")
     print("3. Once the line is drawn, press 'Enter' to confirm.")
     print("4. Press 'r' to reset and draw again if you make a mistake.")
 
@@ -58,13 +60,13 @@ def get_scale_from_user(image):
         cv2.imshow(window_name, clone)
         key = cv2.waitKey(1) & 0xFF
 
-        if key == ord("r"):  # Reset if the user makes a mistake
+        if key == ord("r"):
             clone = image.copy()
-            param_dict['image'] = clone # update image in dict
+            param_dict['image'] = clone
             ref_points = []
             print("Reset. Please draw the line again.")
             
-        elif key == 13:  # 13 is the Enter key
+        elif key == 13:
             if len(ref_points) == 2:
                 break
             else:
@@ -73,11 +75,9 @@ def get_scale_from_user(image):
     cv2.destroyAllWindows()
 
     if len(ref_points) == 2:
-        # Calculate the pixel length of the drawn line
         pixel_length = np.sqrt((ref_points[1][0] - ref_points[0][0])**2 + 
                                (ref_points[1][1] - ref_points[0][1])**2)
         
-        # Use a robust command-line prompt
         real_world_length = None
         while real_world_length is None:
             try:
@@ -94,77 +94,117 @@ def get_scale_from_user(image):
     
     return None
 
-def _estimate_atom_properties(img_processed):
-    """
-    Analyzes the image to automatically estimate the average area of atoms
-    using adaptive thresholding.
-    """
-    # Increase the block size to better handle blurry/fuzzy spots
-    binary_img = cv2.adaptiveThreshold(img_processed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                     cv2.THRESH_BINARY, 21, 2)
-    contours, _ = cv2.findContours(binary_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+def roi_interaction_callback(event, x, y, flags, param):
+    """Mouse callback for drawing and resizing the ROI rectangle."""
+    global roi_rect, drawing_roi, resizing_handle
 
-    if not contours: return None
-    areas = [cv2.contourArea(c) for c in contours]
-    plausible_areas = [area for area in areas if 5 < area < 500]
+    if event == cv2.EVENT_LBUTTONDOWN:
+        if roi_rect is not None:
+            (rx, ry, rw, rh) = roi_rect
+            handles = {
+                'top-left': (rx, ry), 'top-right': (rx + rw, ry),
+                'bottom-left': (rx, ry + rh), 'bottom-right': (rx + rw, ry + rh)
+            }
+            for name, (hx, hy) in handles.items():
+                if abs(x - hx) < HANDLE_SIZE and abs(y - hy) < HANDLE_SIZE:
+                    resizing_handle = name
+                    return
+        drawing_roi = True
+        roi_rect = [x, y, 0, 0]
 
-    if not plausible_areas: return None
-    return np.median(plausible_areas)
+    elif event == cv2.EVENT_MOUSEMOVE:
+        if drawing_roi:
+            roi_rect[2] = x - roi_rect[0]
+            roi_rect[3] = y - roi_rect[1]
+        elif resizing_handle:
+            (rx, ry, rw, rh) = roi_rect
+            if resizing_handle == 'top-left':
+                roi_rect = [x, y, rw + (rx - x), rh + (ry - y)]
+            elif resizing_handle == 'top-right':
+                roi_rect = [rx, y, x - rx, rh + (ry - y)]
+            elif resizing_handle == 'bottom-left':
+                roi_rect = [x, ry, rw + (rx - x), y - ry]
+            elif resizing_handle == 'bottom-right':
+                roi_rect = [rx, ry, x - rx, y - ry]
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        drawing_roi = False
+        resizing_handle = None
+        if roi_rect is not None:
+            # Ensure width and height are positive
+            roi_rect[0] = min(roi_rect[0], roi_rect[0] + roi_rect[2])
+            roi_rect[1] = min(roi_rect[1], roi_rect[1] + roi_rect[3])
+            roi_rect[2] = abs(roi_rect[2])
+            roi_rect[3] = abs(roi_rect[3])
+
+def custom_select_roi(image):
+    """A custom ROI selector that allows resizing."""
+    global roi_rect
+    roi_rect = None
+    clone = image.copy()
+    window_name = "Select Analysis Region (ROI)"
+    cv2.namedWindow(window_name)
+    cv2.setMouseCallback(window_name, roi_interaction_callback)
+
+    print("\nINSTRUCTIONS (ROI SELECTION):")
+    print("1. Draw a rectangle around the atoms.")
+    print("2. Drag the corners to resize the box.")
+    print("3. Press 'Enter' to confirm, or 'r' to reset.")
+
+    while True:
+        temp_image = clone.copy()
+        if roi_rect is not None and roi_rect[2] > 0 and roi_rect[3] > 0:
+            (x, y, w, h) = [int(v) for v in roi_rect]
+            cv2.rectangle(temp_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            handles = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
+            for hx, hy in handles:
+                cv2.circle(temp_image, (hx, hy), HANDLE_SIZE, (0, 0, 255), -1)
+        
+        cv2.imshow(window_name, temp_image)
+        key = cv2.waitKey(1) & 0xFF
+
+        if key == ord('r'):
+            roi_rect = None
+        elif key == 13: # Enter
+            break
+            
+    cv2.destroyAllWindows()
+    if roi_rect and roi_rect[2] > 0 and roi_rect[3] > 0:
+        return tuple(int(v) for v in roi_rect)
+    return None
+
 
 def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
     """
     Measures atomic lattice vectors from a TEM image using a universal method
-    that adapts to different lattice types.
-    NOTE: Requires scikit-learn (`pip install scikit-learn`)
+    that adapts to different lattice types. Uses peak finding for atom detection.
+    NOTE: Requires scikit-learn (`pip install scikit-learn`) and
+          scikit-image (`pip install scikit-image`)
     """
-    # 1. Preprocess the Image
+    # 1. Preprocess the Image - CLAHE is great for enhancing local contrast
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     img_enhanced = clahe.apply(img)
     
-    img_blurred = cv2.GaussianBlur(img_enhanced, (5, 5), 0)
-    
-    # 2. Automatically estimate atom area
-    estimated_area = _estimate_atom_properties(img_blurred)
-    if estimated_area is None:
-        print("Could not automatically estimate atom size. Please check image quality.")
-        return
-    
-    print(f"Automatically estimated median atom area: {estimated_area:.2f} pixels^2")
+    # 2. Find Atom Centers using Local Maxima Peak Finding
+    min_dist = 5
+    coordinates = peak_local_max(img_enhanced, min_distance=min_dist, threshold_rel=0.5, exclude_border=True)
 
-    # 3. Set up Blob Detector
-    params = cv2.SimpleBlobDetector_Params()
-    params.filterByColor = True
-    params.blobColor = 255
-    params.filterByArea = True
-    params.minArea = estimated_area * 0.4
-    params.maxArea = estimated_area * 1.6
-    params.filterByCircularity = True
-    params.minCircularity = 0.3
-    params.filterByConvexity = True
-    params.minConvexity = 0.75
-    params.filterByInertia = True
-    params.minInertiaRatio = 0.2
-    detector = cv2.SimpleBlobDetector_create(params)
-
-    # 4. Detect Atoms
-    keypoints = detector.detect(img_blurred)
-    if not keypoints:
-        print("No atoms detected. The automatic estimation might have failed.")
+    if len(coordinates) < 10:
+        print(f"Detection failed. Found only {len(coordinates)} atoms. Try a larger ROI or check image contrast.")
         return
-    print(f"Detected {len(keypoints)} atoms.")
-    coords = np.array([kp.pt for kp in keypoints])
+
+    coords = coordinates[:, ::-1]
+    print(f"Detected {len(coords)} atoms.")
 
     # --- UNIVERSAL LATTICE VECTOR FINDER ---
-    if len(coords) < 10:
-        print("Not enough atoms detected for lattice vector analysis.")
-        return
 
-    # 5. Find nearest-neighbor vectors for each atom
+    # 3. Find nearest-neighbor vectors for each atom
     tree = KDTree(coords)
-    # Find up to 7 neighbors for robustness
     distances, indices = tree.query(coords, k=min(7, len(coords)))
     
     neighbor_vectors = []
+    all_nearest_neighbor_distances = distances[:, 1]
+    
     for i, point_indices in enumerate(indices):
         for neighbor_index in point_indices[1:]:
             vector = coords[neighbor_index] - coords[i]
@@ -172,21 +212,19 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
     
     neighbor_vectors = np.array(neighbor_vectors)
 
-    # 6. Use DBSCAN to find clusters of vectors without specifying the number of clusters
-    # eps: The search radius for neighbors. Related to atom spacing.
-    # min_samples: How many vectors must be in a cluster to be considered valid.
-    eps = np.sqrt(estimated_area) * 0.5 
-    min_samples = max(5, int(len(coords) * 0.5)) # Require at least 5 atoms or 50% to confirm a direction
+    # 4. Use DBSCAN to find clusters of vectors, with adaptive parameters
+    median_nn_distance = np.median(all_nearest_neighbor_distances)
+    eps = median_nn_distance * 0.4
+    min_samples = max(5, int(len(coords) * 0.25))
 
     db = DBSCAN(eps=eps, min_samples=min_samples).fit(neighbor_vectors)
     labels = db.labels_
     
     unique_labels = set(labels)
-    # Remove the noise label (-1)
     if -1 in unique_labels:
         unique_labels.remove(-1)
 
-    # 7. Calculate the mean vector for each discovered cluster
+    # 5. Calculate the mean vector for each discovered cluster
     cluster_centers = []
     for k in unique_labels:
         class_members = labels == k
@@ -199,17 +237,14 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
         
     print(f"Discovered {len(cluster_centers)} primary vector directions.")
     
-    # 8. Select the two basis vectors from the cluster centers
-    # Sort the vectors by length
+    # 6. Select the two basis vectors from the cluster centers
     cluster_centers = sorted(cluster_centers, key=np.linalg.norm)
     vec_a = cluster_centers[0]
     vec_b = None
 
-    # Find the next shortest vector that is not parallel to vec_a
     for i in range(1, len(cluster_centers)):
         cos_sim = np.dot(vec_a, cluster_centers[i]) / (np.linalg.norm(vec_a) * np.linalg.norm(cluster_centers[i]))
-        # if angle is > 18 degrees (cos_sim < 0.95), it's a distinct vector
-        if abs(cos_sim) < 0.95: 
+        if abs(cos_sim) < 0.95:
             vec_b = cluster_centers[i]
             break
     
@@ -217,7 +252,7 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
         print("Could not determine two distinct lattice vectors. The structure may be 1D.")
         return
         
-    # 9. Calculate lengths and angle
+    # 7. Calculate lengths and angle
     len_a_pixels = np.linalg.norm(vec_a)
     len_b_pixels = np.linalg.norm(vec_b)
     
@@ -233,17 +268,17 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
     print(f"Lattice Vector b: {len_b_nm:.4f} nm")
     print(f"Angle between vectors: {angle_deg:.2f} degrees")
 
-    # 10. Visualization
-    img_with_keypoints = cv2.drawKeypoints(img, keypoints, np.array([]), (0, 0, 255),
-                                           cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+    # 8. Visualization
+    img_with_detections = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    for x, y in coords:
+        cv2.circle(img_with_detections, (int(x), int(y)), 3, (0, 0, 255), 1)
     
     center_atom_idx = np.argmin(np.linalg.norm(coords - np.mean(coords, axis=0), axis=1))
     start_point = tuple(coords[center_atom_idx].astype(int))
     end_point_a = tuple((coords[center_atom_idx] + vec_a).astype(int))
     end_point_b = tuple((coords[center_atom_idx] + vec_b).astype(int))
-    cv2.arrowedLine(img_with_keypoints, start_point, end_point_a, (0, 255, 0), 2)
-    cv2.arrowedLine(img_with_keypoints, start_point, end_point_b, (0, 255, 255), 2)
-
+    cv2.arrowedLine(img_with_detections, start_point, end_point_a, (0, 255, 0), 2)
+    cv2.arrowedLine(img_with_detections, start_point, end_point_b, (0, 255, 255), 2)
 
     plt.figure(figsize=(18, 6))
     plt.subplot(1, 3, 1)
@@ -252,12 +287,12 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
     plt.axis('off')
 
     plt.subplot(1, 3, 2)
-    plt.imshow(img_blurred, cmap='gray')
-    plt.title('Processed (Blurred) Image')
+    plt.imshow(img_enhanced, cmap='gray')
+    plt.title('Enhanced Image')
     plt.axis('off')
 
     plt.subplot(1, 3, 3)
-    plt.imshow(img_with_keypoints)
+    plt.imshow(cv2.cvtColor(img_with_detections, cv2.COLOR_BGR2RGB))
     plt.title(f'Lattice Vectors Detected')
     plt.axis('off')
     
@@ -266,36 +301,32 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
 
 # --- MAIN EXECUTION ---
 if __name__ == '__main__':
-    # You must provide the path to your own image.
-    image_path = 'OutputImagesLee/Page2_Figure_1_a.png' 
+    image_path = 'OutputImage.png' 
 
     try:
-        # Load the image once
-        original_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-        if original_img is None:
+        # Load the original image in grayscale for analysis
+        original_img_gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if original_img_gray is None:
             raise FileNotFoundError
 
-        # Step 1: Get scale from user interactively
-        pixel_to_nm = get_scale_from_user(original_img)
+        # --- FIX: Create a color version for UI operations ---
+        original_img_bgr = cv2.cvtColor(original_img_gray, cv2.COLOR_GRAY2BGR)
 
-        # Step 2: If scale is valid, ask for ROI and then run the analysis
+        # Pass the BGR image to the UI function
+        pixel_to_nm = get_scale_from_user(original_img_bgr)
+
         if pixel_to_nm:
             print(f"\nCalculated pixel-to-nm ratio: {pixel_to_nm:.6f}")
             
-            print("\nINSTRUCTIONS FOR ROI SELECTION:")
-            print("1. A window will appear with your image.")
-            print("2. Click and drag to draw a rectangle around the ATOMS you want to analyze.")
-            print("3. Press 'Enter' or 'Space' to confirm the ROI.")
+            # Pass the BGR image to the ROI selector for correct color drawing
+            roi = custom_select_roi(original_img_bgr)
             
-            roi = cv2.selectROI("Select Analysis Region (ROI)", original_img, fromCenter=False, showCrosshair=True)
-            cv2.destroyWindow("Select Analysis Region (ROI)")
-            
-            img_roi = original_img[int(roi[1]):int(roi[1]+roi[3]), int(roi[0]):int(roi[0]+roi[2])]
-
-            if img_roi.size == 0:
-                 print("\nNo ROI selected. Exiting.")
+            if roi is None or roi[2] == 0 or roi[3] == 0:
+                 print("\nNo ROI selected or invalid ROI. Exiting.")
             else:
-                measure_atomic_spacing_realspace(img_roi, pixel_to_nm)
+                # IMPORTANT: Crop the ROI from the original GRAYSCALE image for analysis
+                img_roi_gray = original_img_gray[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]]
+                measure_atomic_spacing_realspace(img_roi_gray, pixel_to_nm)
         else:
             print("\nScale measurement cancelled or failed. Exiting.")
 
@@ -304,5 +335,5 @@ if __name__ == '__main__':
     except FileNotFoundError:
         print(f"\nERROR: The file '{image_path}' was not found. Please provide a valid path.")
     except ImportError:
-        print("\nERROR: This script requires scikit-learn. Please install it using 'pip install scikit-learn'")
+        print("\nERROR: This script requires scikit-learn and scikit-image. Please install them:\n'pip install scikit-learn scikit-image'")
 

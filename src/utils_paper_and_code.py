@@ -56,6 +56,16 @@ def suggest_prompts_from_paper(paper_text: str, model_name: str = "gemini-2.5-fl
     return out[:3]
 
 
+def is_llm_quota_error(exc: Exception | str) -> bool:
+    """Heuristically detect quota/rate-limit/billing errors from LLM providers."""
+    msg = str(exc).lower()
+    triggers = [
+        "quota", "rate limit", "429", "resource has been exhausted",
+        "insufficient", "billing", "out of tokens", "credit", "exceeded"
+    ]
+    return any(t in msg for t in triggers)
+
+
 def build_constraints_prompt(constraints: dict) -> str:
     """Format a constraints dictionary into a concise prompt snippet.
     Expected keys (all optional):

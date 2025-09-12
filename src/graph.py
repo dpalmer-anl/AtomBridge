@@ -6,7 +6,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain.chat_models import init_chat_model
 from .mp_api import mp_api_validate_from_text
 
-from .utils_paper_and_code import parse_pdf, extract_code, run_code
+from .utils_paper_and_code import parse_pdf, extract_code, run_code, is_llm_quota_error
 from .create_ASE_RAG import RAG_ASE
 
 
@@ -58,8 +58,12 @@ def plan_targets(state: S) -> S:
         "Return a concise plan and the specific structures to generate."
     )
     llm = _get_llm(plan_model)
-    msg = llm.invoke(prompt)
-    return {"target_plan": msg.content}
+    try:
+        msg = llm.invoke(prompt)
+        return {"target_plan": msg.content}
+    except Exception as e:
+        etype = "llm_quota" if is_llm_quota_error(e) else "llm_error"
+        return {"error": {"where": "plan_targets", "type": etype, "message": str(e)}}
 
 
 def synthesize_code(state: S) -> S:
@@ -70,17 +74,21 @@ def synthesize_code(state: S) -> S:
         or os.getenv("MODEL_CODE_NAME")
         or "gemini-2.5-pro"
     )
-    rag_tool = RAG_ASE(model_name=code_model)
     query = (
         "Write Python code that constructs ase.Atoms objects for the systems described below, "
         "creates supercells where appropriate, optionally introduces defects or grain boundaries as described, "
         "and writes each structure to a descriptive .cif file in the current working directory using ase.io.write.\n\n"
         f"Targets:\n{plan}"
     )
-    rag_res = rag_tool(query)
-    answer = rag_res.get("answer", "") or ""
-    code = extract_code(answer)
-    return {"rag_answer": answer, "generated_code": code}
+    try:
+        rag_tool = RAG_ASE(model_name=code_model)
+        rag_res = rag_tool(query)
+        answer = rag_res.get("answer", "") or ""
+        code = extract_code(answer)
+        return {"rag_answer": answer, "generated_code": code}
+    except Exception as e:
+        etype = "llm_quota" if is_llm_quota_error(e) else "llm_error"
+        return {"error": {"where": "synthesize_code", "type": etype, "message": str(e)}}
 
 
 def run_generated_code(state: S) -> S:

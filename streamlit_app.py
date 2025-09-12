@@ -224,32 +224,16 @@ with st.sidebar:
     st.divider()
     st.markdown("- Ensure ASE is installed locally.\n- First run may build a local Chroma DB.")
     st.divider()
-    st.subheader("Mode")
-    mode = st.selectbox(
-        "Choose a mode",
-        options=["Balanced (recommended)", "Accurate (slower)", "Fast (cheaper)"],
+        st.subheader("Model")
+    selected_model = st.selectbox(
+        "Choose model",
+        options=["gemini-2.5-pro", "gemini-2.5-flash"],
         index=0,
-        help="Balanced uses Flash for planning and Pro for code. Accurate uses Pro for both. Fast uses Flash for both.",
+        help="Pick Pro or Flash. Planning uses Flash to save quota.",
     )
-
-    # Map mode  models
-    if mode.startswith("Balanced"):
-        plan_model = "gemini-2.5-flash"
-        code_model = "gemini-2.5-pro"
-    elif mode.startswith("Accurate"):
-        plan_model = "gemini-2.5-pro"
-        code_model = "gemini-2.5-pro"
-    else:  # Fast
-        plan_model = "gemini-2.5-flash"
-        code_model = "gemini-2.5-flash"
-
-    with st.expander("Advanced model settings"):
-        plan_model = st.selectbox(
-            "Planning model",
-            options=["gemini-2.5-flash", "gemini-2.5-pro"],
-            index=["gemini-2.5-flash", "gemini-2.5-pro"].index(plan_model),
-            help="Used for extracting targets/plan from the paper",
-        )
+    # Effective models
+    plan_model = "gemini-2.5-flash"
+    code_model = selected_model
     st.divider()
     st.subheader("Materials Project API Validation")
     st.caption("Validate via official MP API (preferred). Enter your MP API key; no server needed.")
@@ -417,9 +401,9 @@ if not final_prompt:
 
 col1, col2 = st.columns(2)
 with col1:
-    dry = st.button("Plan & Generate Code (no exec)")
+    dry = st.button("Generate ASE Code")
 with col2:
-    full = st.button("Run Full Pipeline (exec code)")
+    full = st.button("Generate .cif")
 
 auto_exec = bool(st.session_state.get("auto_exec"))
 if auto_exec and not pdf_path:
@@ -636,5 +620,7 @@ if st.session_state.figures:
                         st.warning("Outside margin of error - consider refining constraints or code.")
                 except Exception as e:
                     st.error(f"Comparison failed: {e}")
+
+
 
 

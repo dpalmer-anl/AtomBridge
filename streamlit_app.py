@@ -459,6 +459,24 @@ if st.session_state.suggested_prompts:
                             errors.append(str(e))
                     new_cifs = [str(p) for p in Path('.').glob('*.cif')]
                     st.session_state.last_cifs = new_cifs
+                    # Run quick overlap check on generated CIFs
+                    try:
+                        from ase.io import read as ase_read
+                        from src.structure_checks import check_atom_distances
+                        bads = []
+                        for p in new_cifs:
+                            try:
+                                atoms = ase_read(p)
+                                check_atom_distances(atoms)
+                            except Exception as ee:
+                                bads.append((p, str(ee)))
+                        if bads:
+                            with st.expander('Warnings: Potential atom overlaps detected'):
+                                for p, msg in bads:
+                                    st.write(p)
+                                    st.code(msg)
+                    except Exception:
+                        pass
                     st.success(f'Completed generation for {gen_count} TEM-linked prompts. Found {len(new_cifs)} CIFs in working directory.')
                     # Show CIF visuals like single-run
                     st.subheader('Generated CIF Files (recent)')
@@ -985,6 +1003,24 @@ if fig is not None:
         # Refresh CIF list
         new_cifs = [str(p) for p in Path('.').glob('*.cif')]
         st.session_state.last_cifs = new_cifs
+        # Quick overlap checks
+        try:
+            from ase.io import read as ase_read
+            from src.structure_checks import check_atom_distances
+            bads = []
+            for p in new_cifs:
+                try:
+                    atoms = ase_read(p)
+                    check_atom_distances(atoms)
+                except Exception as ee:
+                    bads.append((p, str(ee)))
+            if bads:
+                with st.expander('Warnings: Potential atom overlaps detected'):
+                    for p, msg in bads:
+                        st.write(p)
+                        st.code(msg)
+        except Exception:
+            pass
         st.session_state.last_code = result2.get("code") or ""
         st.success("CIF generation attempt finished.")
 
@@ -1001,6 +1037,26 @@ if fig is not None:
                         st.warning("Outside margin of error - consider refining constraints or code.")
                 except Exception as e:
                     st.error(f"Comparison failed: {e}")
+
+    # Optional M3GNET validation on last CIFs
+    if st.session_state.get('last_cifs'):
+        with st.expander('Optional: Validate last CIFs with M3GNET (slow)'):
+            if st.button('Run M3GNET relaxation on last CIFs'):
+                try:
+                    from src.structure_checks import validate_m3gnet
+                    energies = []
+                    for p in st.session_state['last_cifs']:
+                        try:
+                            e, _ = validate_m3gnet(p)
+                            energies.append((p, e))
+                        except Exception as ee:
+                            st.write(f"{p}: {ee}")
+                    if energies:
+                        st.subheader('M3GNET energies (lower is better)')
+                        for p, e in energies:
+                            st.write(f"{Path(p).name}: {e:.6f}")
+                except Exception as e:
+                    st.info(f"M3GNET validation not available: {e}")
 
     # Combined analysis to paper and MP
     if crop_path and st.button("Analyze to Paper and MP"):

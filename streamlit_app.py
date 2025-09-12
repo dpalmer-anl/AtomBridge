@@ -7,6 +7,8 @@ from src.graph import load_paper, plan_targets, synthesize_code, run_generated_c
 from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt
 from src.create_ASE_RAG import RAG_ASE
 from src.mp_api import mp_api_validate_from_text
+from src.figures import extract_figures, run_tem_to_atom_coords
+from src.validation import compare_image_coords_to_cif
 
 
 UPLOAD_DIR = Path("_uploads")
@@ -292,6 +294,10 @@ if "last_cifs" not in st.session_state:
     st.session_state.last_cifs = []
 if "last_code" not in st.session_state:
     st.session_state.last_code = ""
+if "figures" not in st.session_state:
+    st.session_state.figures = []
+if "fig_coords" not in st.session_state:
+    st.session_state.fig_coords = {}
 
 analyze = st.button("Analyze Paper & Suggest Prompts")
 if analyze:
@@ -563,3 +569,55 @@ if regen:
         "role": "assistant",
         "content": f"Regenerated code (rc={result.get('rc')}), see above for outputs."
     })
+
+st.divider()
+st.subheader("Analyze Figures from Paper")
+colF1, colF2 = st.columns(2)
+with colF1:
+    if st.button("Extract Figures"):
+        if not pdf_path:
+            st.error("Select or upload a PDF above first.")
+        else:
+            with st.spinner("Extracting figures and captions..."):
+                try:
+                    figs = extract_figures(pdf_path)
+                    st.session_state.figures = figs
+                    st.success(f"Found {len(figs)} figures.")
+                except Exception as e:
+                    st.error(f"Figure extraction failed: {e}")
+with colF2:
+    selected_cif = None
+    if st.session_state.last_cifs:
+        selected_cif = st.selectbox("CIF to compare", st.session_state.last_cifs)
+    else:
+        st.caption("Run a pipeline first to generate CIFs, or drop a CIF into repo root.")
+
+if st.session_state.figures:
+    options = [f"Page {f.page_index+1}: {Path(f.image_path).name}" for f in st.session_state.figures]
+    idx = st.selectbox("Pick a figure", list(range(len(options))), format_func=lambda i: options[i])
+    fig = st.session_state.figures[idx]
+    st.image(fig.image_path, caption=fig.caption or "(no caption)", use_column_width=True)
+
+    if st.button("Detect atoms in figure"):
+        with st.spinner("Detecting atomic coordinates in image…"):
+            try:
+                coords = run_tem_to_atom_coords(fig.image_path)
+                st.session_state.fig_coords[fig.image_path] = coords
+                st.success(f"Detected {len(coords)} candidate atomic sites.")
+            except Exception as e:
+                st.error(f"Detection failed: {e}")
+
+    coords = st.session_state.fig_coords.get(fig.image_path)
+    if coords and selected_cif:
+        if st.button("Compare detected atoms to selected CIF"):
+            with st.spinner("Comparing image-derived coordinates to CIF…"):
+                try:
+                    res = compare_image_coords_to_cif(selected_cif, coords)
+                    st.subheader("Image vs CIF comparison")
+                    st.json(res)
+                    if res.get("pass"):
+                        st.success("Within margin of error.")
+                    else:
+                        st.warning("Outside margin of error — consider refining constraints or code.")
+                except Exception as e:
+                    st.error(f"Comparison failed: {e}")

@@ -104,9 +104,9 @@ def generate_and_fix_code(user_prompt: str, paper_text: str, code_model: str, ma
             # simple supercell hint
             supercell_hint = "supercell" if "supercell" in (h.get("stderr") or "").lower() else None
             if supercell_hint:
-                fix_lines.append(f"Iteration {h['iteration']}: error while generating supercell â€” {err_snip}. Tried to regenerate code with error context.")
+                fix_lines.append(f"Iteration {h['iteration']}: error while generating supercell - {err_snip}. Tried to regenerate code with error context.")
             else:
-                fix_lines.append(f"Iteration {h['iteration']}: error â€” {err_snip}. Tried to regenerate code with error context.")
+                fix_lines.append(f"Iteration {h['iteration']}: error - {err_snip}. Tried to regenerate code with error context.")
 
     return {
         "code": last_code,
@@ -175,11 +175,11 @@ def generate_and_fix_code_v2(user_prompt: str, paper_text: str, code_model: str,
             err_snip = "; ".join(err[:2]) if err else "error occurred"
             if "supercell" in (h.get("stderr") or "").lower():
                 fix_lines.append(
-                    f"Iteration {h['iteration']}: error while generating supercell â€” {err_snip}. Tried to regenerate code with error context."
+                    f"Iteration {h['iteration']}: error while generating supercell - {err_snip}. Tried to regenerate code with error context."
                 )
             else:
                 fix_lines.append(
-                    f"Iteration {h['iteration']}: error â€” {err_snip}. Tried to regenerate code with error context."
+                    f"Iteration {h['iteration']}: error - {err_snip}. Tried to regenerate code with error context."
                 )
 
     return {
@@ -194,13 +194,13 @@ def generate_and_fix_code_v2(user_prompt: str, paper_text: str, code_model: str,
 
 
 st.set_page_config(page_title="Atombridge", layout="wide")
-st.title("TEM â†’ CIF")
+st.title("TEM to CIF")
 st.caption("Run the minimal pipeline without using the terminal.")
 
 with st.sidebar:
     st.header("Environment")
     key_present = bool(os.getenv("GOOGLE_API_KEY"))
-    st.write("GOOGLE_API_KEY:", "âœ… set" if key_present else "âŒ missing")
+    st.write("GOOGLE_API_KEY:", "set" if key_present else "missing")
     api_key_input = st.text_input("Enter API key (not saved)", type="password", help="Used only for this session")
     if st.button("Use key for this session"):
         if api_key_input.strip():
@@ -220,7 +220,7 @@ with st.sidebar:
         help="Balanced uses Flash for planning and Pro for code. Accurate uses Pro for both. Fast uses Flash for both.",
     )
 
-    # Map mode â†’ models
+    # Map mode  models
     if mode.startswith("Balanced"):
         plan_model = "gemini-2.5-flash"
         code_model = "gemini-2.5-pro"
@@ -304,7 +304,7 @@ if analyze:
     if not pdf_path:
         st.error("Please provide a PDF (upload or pick from papers/)")
         st.stop()
-    with st.spinner("Reading paper and proposing prompts…" ):€¦"):
+    with st.spinner("Reading paper and proposing prompts..."):
         try:
             # Reuse the graph helper to parse the paper
             state = {"paper_path": pdf_path}
@@ -335,17 +335,17 @@ with st.expander("Specify constraints from TEM/paper"):
     sg = st.text_input("Space group (symbol or number)", placeholder="e.g., P6_3/mmc or 194")
     c1, c2, c3 = st.columns(3)
     with c1:
-        a_val = st.number_input("a (Ã…)", min_value=0.0, value=0.0, step=0.01)
-        alpha_val = st.number_input("alpha (Â°)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
+        a_val = st.number_input("a ()", min_value=0.0, value=0.0, step=0.01)
+        a_val = st.number_input("a (Angstrom)", min_value=0.0, value=0.0, step=0.01)
     with c2:
-        b_val = st.number_input("b (Ã…)", min_value=0.0, value=0.0, step=0.01)
-        beta_val = st.number_input("beta (Â°)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
+        b_val = st.number_input("b ()", min_value=0.0, value=0.0, step=0.01)
+        b_val = st.number_input("b (Angstrom)", min_value=0.0, value=0.0, step=0.01)
     with c3:
-        c_val = st.number_input("c (Ã…)", min_value=0.0, value=0.0, step=0.01)
-        gamma_val = st.number_input("gamma (Â°)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
+        c_val = st.number_input("c ()", min_value=0.0, value=0.0, step=0.01)
+        c_val = st.number_input("c (Angstrom)", min_value=0.0, value=0.0, step=0.01)
 
-    d_text = st.text_area("d-spacings (Ã…, comma or space separated)", placeholder="e.g., 2.46, 1.42, 1.23")
-    sc1, sc2, sc3 = st.columns(3)
+    d_text = st.text_area("d-spacings (, comma or space separated)", placeholder="e.g., 2.46, 1.42, 1.23")
+    d_text = st.text_area("d-spacings (Angstroms, comma or space separated)", placeholder="e.g., 2.46, 1.42, 1.23")
     with sc1:
         scx = st.number_input("Supercell Nx", min_value=1, value=1, step=1)
     with sc2:
@@ -358,7 +358,7 @@ with st.expander("Specify constraints from TEM/paper"):
     defect_details = st.text_area("Defect details", placeholder="e.g., S vacancy at 1% in 2x2 supercell")
 
     gb = st.checkbox("Include grain boundary")
-    gb_desc = st.text_input("Grain boundary description", disabled=not gb, placeholder="e.g., tilt GB ~5Â° along [10-10]")
+    gb_desc = st.text_input("Grain boundary description", disabled=not gb, placeholder="e.g., tilt GB ~5 along [10-10]")
 
 notes = st.text_area(
     "Your prompt (optional)",
@@ -417,7 +417,7 @@ if (dry or full or auto_exec):
         st.stop()
     do_exec = bool(full or auto_exec)
     start_ts = time.time()
-    with st.spinner("Running pipeline… this may take a moment on first run"):
+    with st.spinner("Running pipeline... this may take a moment on first run"):
         try:
             # If user gave a direct prompt, use generate_and_fix_code; otherwise run the graph path
             if final_prompt:
@@ -558,7 +558,7 @@ if regen:
     convo_text = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.conversation])
     extra = ("\n\nConstraints:\n" + constraints_text) if constraints_text else ""
     combined_prompt = (final_prompt or "Generate CIFs from the paper") + extra + "\n" + convo_text
-    with st.spinner("Regenerating code using conversation contextâ€¦"):
+    with st.spinner("Regenerating code using conversation context..."):
         result = generate_and_fix_code_v2(
             user_prompt=combined_prompt,
             paper_text=st.session_state.paper_text or "",
@@ -599,7 +599,7 @@ if st.session_state.figures:
     st.image(fig.image_path, caption=fig.caption or "(no caption)", use_column_width=True)
 
     if st.button("Detect atoms in figure"):
-        with st.spinner("Detecting atomic coordinates in imageâ€¦"):
+        with st.spinner("Detecting atomic coordinates in image..."):
             try:
                 coords = run_tem_to_atom_coords(fig.image_path)
                 st.session_state.fig_coords[fig.image_path] = coords
@@ -610,7 +610,7 @@ if st.session_state.figures:
     coords = st.session_state.fig_coords.get(fig.image_path)
     if coords and selected_cif:
         if st.button("Compare detected atoms to selected CIF"):
-            with st.spinner("Comparing image-derived coordinates to CIFâ€¦"):
+            with st.spinner("Comparing image-derived coordinates to CIF..."):
                 try:
                     res = compare_image_coords_to_cif(selected_cif, coords)
                     st.subheader("Image vs CIF comparison")
@@ -618,10 +618,11 @@ if st.session_state.figures:
                     if res.get("pass"):
                         st.success("Within margin of error.")
                     else:
-                        st.warning("Outside margin of error â€” consider refining constraints or code.")
+                        st.warning("Outside margin of error - consider refining constraints or code.")
                 except Exception as e:
                     st.error(f"Comparison failed: {e}")
-# Default ""search all"" prompt text for non-coders
+
+# Default ""search all"" prompt text for non-coders
 DEFAULT_SEARCH_ALL_PROMPT = (
     "I am interested in investigating the structures defined in this paper using atomistic simulation. "
     "This paper contains TEM results with structural information. Determine the structures of interest in this paper. "
@@ -635,6 +636,7 @@ DEFAULT_SEARCH_ALL_PROMPT = (
 
 if \"prompt_input\" not in st.session_state:
     st.session_state.prompt_input = DEFAULT_SEARCH_ALL_PROMPT
+
 
 
 

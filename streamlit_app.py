@@ -471,10 +471,13 @@ if st.session_state.suggested_prompts:
                             except Exception as ee:
                                 bads.append((p, str(ee)))
                         if bads:
+                            st.error(f"Atom-overlap check failed for {len(bads)}/{len(new_cifs)} CIF(s). See details below.")
                             with st.expander('Warnings: Potential atom overlaps detected'):
                                 for p, msg in bads:
                                     st.write(p)
                                     st.code(msg)
+                        else:
+                            st.success("Atom-overlap check passed for all generated CIFs.")
                     except Exception:
                         pass
                     st.success(f'Completed generation for {gen_count} TEM-linked prompts. Found {len(new_cifs)} CIFs in working directory.')
@@ -495,6 +498,18 @@ if st.session_state.suggested_prompts:
                                     st.download_button(
                                         f'Download {pth.name}', data=f, file_name=pth.name, mime='chemical/x-cif'
                                     )
+                        with st.expander('Optional: Validate these CIFs with M3GNET (slow)'):
+                            if st.button('Run M3GNET relaxation (batch)', key='m3g_batch_recent'):
+                                try:
+                                    from src.structure_checks import validate_m3gnet
+                                    for p in new_cifs:
+                                        try:
+                                            e, _ = validate_m3gnet(p)
+                                            st.write(f"{Path(p).name}: {e:.6f}")
+                                        except Exception as ee:
+                                            st.write(f"{Path(p).name}: {ee}")
+                                except Exception as e:
+                                    st.info(f"M3GNET validation not available: {e}")
                     else:
                         st.info('No CIF files detected. Check STDERR for issues.')
                     if errors:
@@ -685,6 +700,28 @@ if (dry or full or auto_exec):
             except Exception:
                 continue
         st.session_state.last_cifs = [str(p) for p in cif_files]
+        # Overlap check summary for this execution
+        if cif_files:
+            try:
+                from ase.io import read as ase_read
+                from src.structure_checks import check_atom_distances
+                bads = []
+                for p in cif_files:
+                    try:
+                        atoms = ase_read(p)
+                        check_atom_distances(atoms)
+                    except Exception as ee:
+                        bads.append((str(p), str(ee)))
+                if bads:
+                    st.error(f"Atom-overlap check failed for {len(bads)}/{len(cif_files)} CIF(s). See details below.")
+                    with st.expander('Warnings: Potential atom overlaps detected'):
+                        for p, msg in bads:
+                            st.write(p)
+                            st.code(msg)
+                else:
+                    st.success("Atom-overlap check passed for all generated CIFs.")
+            except Exception:
+                pass
         if cif_files:
             for p in cif_files:
                 with st.expander(p.name):
@@ -699,6 +736,18 @@ if (dry or full or auto_exec):
                         st.download_button(
                             f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
                         )
+            with st.expander('Optional: Validate these CIFs with M3GNET (slow)'):
+                if st.button('Run M3GNET relaxation (recent)', key='m3g_exec_recent'):
+                    try:
+                        from src.structure_checks import validate_m3gnet
+                        for p in cif_files:
+                            try:
+                                e, _ = validate_m3gnet(str(p))
+                                st.write(f"{p.name}: {e:.6f}")
+                            except Exception as ee:
+                                st.write(f"{p.name}: {ee}")
+                    except Exception as e:
+                        st.info(f"M3GNET validation not available: {e}")
         else:
             st.info("No new CIF files detected. Check STDERR for issues.")
 
@@ -728,6 +777,30 @@ elif st.session_state.last_result:
         st.write(lr.get("target_plan"))
     if st.session_state.last_cifs:
         st.subheader("Generated CIF Files (last run)")
+        # Overlap check summary for last run
+        try:
+            from ase.io import read as ase_read
+            from src.structure_checks import check_atom_distances
+            bads = []
+            for p_str in st.session_state.last_cifs:
+                p = Path(p_str)
+                if not p.exists():
+                    continue
+                try:
+                    atoms = ase_read(str(p))
+                    check_atom_distances(atoms)
+                except Exception as ee:
+                    bads.append((str(p), str(ee)))
+            if bads:
+                st.error(f"Atom-overlap check failed for {len(bads)}/{len(st.session_state.last_cifs)} CIF(s). See details below.")
+                with st.expander('Warnings: Potential atom overlaps detected (last run)'):
+                    for p, msg in bads:
+                        st.write(p)
+                        st.code(msg)
+            else:
+                st.success("Atom-overlap check passed for all last-run CIFs.")
+        except Exception:
+            pass
         for p_str in st.session_state.last_cifs:
             p = Path(p_str)
             if p.exists():
@@ -741,6 +814,21 @@ elif st.session_state.last_result:
                         st.download_button(
                             f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
                         )
+        with st.expander('Optional: Validate last CIFs with M3GNET (slow)'):
+            if st.button('Run M3GNET relaxation (last run)', key='m3g_last'):
+                try:
+                    from src.structure_checks import validate_m3gnet
+                    for p_str in st.session_state.last_cifs:
+                        p = Path(p_str)
+                        if not p.exists():
+                            continue
+                        try:
+                            e, _ = validate_m3gnet(str(p))
+                            st.write(f"{p.name}: {e:.6f}")
+                        except Exception as ee:
+                            st.write(f"{p.name}: {ee}")
+                except Exception as e:
+                    st.info(f"M3GNET validation not available: {e}")
     if st.session_state.last_code:
         with st.expander("Show Generated Code (last run)"):
             st.code(st.session_state.last_code, language="python")
@@ -1015,10 +1103,13 @@ if fig is not None:
                 except Exception as ee:
                     bads.append((p, str(ee)))
             if bads:
+                st.error(f"Atom-overlap check failed for {len(bads)}/{len(new_cifs)} CIF(s). See details below.")
                 with st.expander('Warnings: Potential atom overlaps detected'):
                     for p, msg in bads:
                         st.write(p)
                         st.code(msg)
+            else:
+                st.success("Atom-overlap check passed for all generated CIFs.")
         except Exception:
             pass
         st.session_state.last_code = result2.get("code") or ""

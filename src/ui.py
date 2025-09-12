@@ -1,14 +1,47 @@
 import os
 import shutil
+import base64
+import mimetypes
 
-# from cropPage import cropAllPdfs
-# from queryText import query_llm
 import streamlit as st
-# from textMining import process_pdf, process_text_files
-# from textSegments import process_files
+import glob
+import pandas as pd
+
+from figures_and_captions import process_pdf
+
+# Helper to build an LLM-ready image payload (bytes + base64 + metadata)
+def build_llm_image_payload(image_path: str, caption: str):
+    mime, _ = mimetypes.guess_type(image_path)
+    if mime is None:
+        mime = "image/png" if image_path.lower().endswith(".png") else "application/octet-stream"
+    with open(image_path, "rb") as f:
+        data = f.read()
+    b64 = base64.b64encode(data).decode("utf-8")
+    return {
+        "filename": os.path.basename(image_path),
+        "path": image_path,
+        "mime": mime,
+        "bytes": data,          # for APIs that accept raw bytes
+        "base64": b64,          # for APIs that require base64
+        "caption": caption,
+    }
 
 # Streamlit app
-st.title("⚛️AtomBridge Graphical Interface")
+st.title("⚛️ AtomBridge Graphical Interface")
+
+# Initialize session state
+if "figure_data" not in st.session_state:
+    st.session_state.figure_data = None
+if "images" not in st.session_state:
+    st.session_state.images = []
+if "captions" not in st.session_state:
+    st.session_state.captions = []
+if "selected_image_path" not in st.session_state:
+    st.session_state.selected_image_path = None
+if "selected_caption" not in st.session_state:
+    st.session_state.selected_caption = None
+if "selected_image_payload" not in st.session_state:
+    st.session_state.selected_image_payload = None
 
 # File uploader
 uploaded_files = st.file_uploader(
@@ -18,114 +51,106 @@ uploaded_files = st.file_uploader(
 # Directory for the output
 outputDirectory = "output"
 text_output_directory = os.path.join(outputDirectory, "text_files")
+image_output_directory = os.path.join(outputDirectory, "image_files")
+os.makedirs(outputDirectory, exist_ok=True)
+os.makedirs(text_output_directory, exist_ok=True)
+os.makedirs(image_output_directory, exist_ok=True)
 
 # Dropdown for model selection
 llm_type = st.selectbox("Select the model type:", ("GPT-5", "Gemini-2.5-Pro", "Claude-3.5", "Claude-4"))
 
-# Process cleaned text files to get embeddings and tokens
-key_file_path = "/Users/riteshk/Library/CloudStorage/Box-Box/Research-postdoc/oxRSE-project/API_KEY"  # Replace with the actual path to your OpenAI key file
+# Process PDFs
+if uploaded_files and st.button("Process PDFs"):
+    # Clean image output to avoid mixing old and new files
+    if os.path.isdir(image_output_directory):
+        shutil.rmtree(image_output_directory)
+    os.makedirs(image_output_directory, exist_ok=True)
 
-# Display uploaded files
-if uploaded_files:
-    # st.write("Uploaded PDF files:")
-    uploaded_file_names = [
-        uploaded_file.name for uploaded_file in uploaded_files
-    ]
-    # for uploaded_file in uploaded_file_names:
-    # st.write(uploaded_file)
+    dfs = []
+    for uf in uploaded_files:
+        file_path = os.path.join(outputDirectory, uf.name)
+        with open(file_path, "wb") as f:
+            f.write(uf.getbuffer())
 
-    # Ensure the output directory exists
-    os.makedirs(outputDirectory, exist_ok=True)
-    os.makedirs(text_output_directory, exist_ok=True)
+        df = process_pdf(file_path, image_output_directory)
+        if df is not None and not df.empty:
+            dfs.append(df)
 
-    # Total number of files uploaded
-    totalFiles = len(uploaded_files)
+    if dfs:
+        figure_data = pd.concat(dfs, ignore_index=True)
+        figure_data["figure_path_files"] = figure_data["image_file"].apply(
+            lambda x: os.path.join(image_output_directory, x)
+        )
+        st.session_state.figure_data = figure_data
+        st.session_state.images = figure_data["figure_path_files"].tolist()
+        st.session_state.captions = figure_data["caption"].tolist()
+        # reset any previous selection
+        st.session_state.selected_image_path = None
+        st.session_state.selected_caption = None
+        st.session_state.selected_image_payload = None
+        st.success(f"Processed {len(uploaded_files)} PDF(s).")
+    else:
+        st.session_state.figure_data = None
+        st.session_state.images = []
+        st.session_state.captions = []
+        st.session_state.selected_image_path = None
+        st.session_state.selected_caption = None
+        st.session_state.selected_image_payload = None
+        st.warning("No figures found in the uploaded PDF(s).")
 
-    # Button to process PDFs
-    # if st.button("Process PDFs"):
-    #     if not os.path.exists(outputDirectory):
-    #         os.makedirs(outputDirectory)
+# API key and prompt inputs (placeholder for later LLM integration)
+api = st.text_input("Provide API key:", type="password")
+prompt = st.text_area("Enter the prompt for the LLM model:")
 
-    #     for uploaded_file in uploaded_files:
-    #         file_path = os.path.join(outputDirectory, uploaded_file.name)
-    #         with open(file_path, "wb") as f:
-    #             f.write(uploaded_file.getbuffer())
-    #         process_pdf(file_path, text_output_directory)
+# Display figures if available
+if st.session_state.figure_data is not None and len(st.session_state.images) > 0:
+    images = st.session_state.images
+    captions = st.session_state.captions
 
-    #     cropAllPdfs(uploaded_file_names, outputDirectory, totalFiles)
+    selected_index = st.slider("Select an image", 0, len(images) - 1, 0)
+    st.image(images[selected_index], caption=captions[selected_index], use_container_width=True)
 
-    #     for uploaded_file in uploaded_files:
-    #         file_path = os.path.join(outputDirectory, uploaded_file.name)
-    #         process_pdf(file_path, text_output_directory)
+    # Select current image for downstream LLM processing
+    if st.button("Use this image for LLM"):
+        st.session_state.selected_image_path = images[selected_index]
+        st.session_state.selected_caption = captions[selected_index]
+        st.session_state.selected_image_payload = build_llm_image_payload(
+            images[selected_index], captions[selected_index]
+        )
+        st.success(f"Selected: {os.path.basename(images[selected_index])} for LLM processing.")
+else:
+    st.info("Upload PDFs and click 'Process PDFs' to view and select extracted figures.")
 
-    #     st.success("PDFs processed successfully.")
-    #     st.write(f"Processed {totalFiles} PDFs.")
-    #     # process_all_pdfs(uploaded_files, outputDirectory)
-    #     # Process text files
-    #     process_text_files(text_output_directory)
-    #     st.write("Text files have been cleaned.")
+# Display figures if available
+# if st.session_state.figure_data is not None and len(st.session_state.images) > 0:
+#     images = st.session_state.images
+#     captions = st.session_state.captions
 
-    #     # # Process cleaned text files to get embeddings and tokens
-    #     # key_file_path = (
-    #     #     "/Users/riteshk/Library/CloudStorage/Box-Box/Research-postdoc/oxRSE-project/API_KEY"  # Replace with the actual path to your OpenAI key file
-    #     # )
-    #     # llm_type = (
-    #     #     "Ollama"  # Specify the LLM type (e.g., 'GPT', 'HF', 'Ollama')
-    #     # )
-    #     process_files(
-    #         text_output_directory, outputDirectory, key_file_path, llm_type
-    #     )
-    #     st.write(
-    #         "Text files have been processed to get embeddings and tokens."
-    #     )
+#     selected_index = st.slider("Select an image", 0, len(images) - 1, 0)
+#     st.image(images[selected_index], caption=captions[selected_index], use_container_width=True)
 
-# Text input for question
-# question = st.text_area("Provide API key:")
-question = st.text_input("Provide API key:", type="password")
+#     # Download selected image
+#     try:
+#         with open(images[selected_index], "rb") as fh:
+#             st.download_button(
+#                 label="Download image",
+#                 data=fh.read(),
+#                 file_name=os.path.basename(images[selected_index]),
+#             )
+#     except FileNotFoundError:
+#         st.warning("Selected image file not found on disk.")
+# else:
+#     st.info("Upload PDFs and click 'Process PDFs' to view extracted figures.")
 
-# Text input for prompt
-prompt = st.text_area("Enter the prompt for the model:")
+# Preview the selected image payload (for downstream use)
+if st.session_state.selected_image_payload:
+    sel = st.session_state.selected_image_payload
+    st.subheader("Selected image for LLM (prepared)")
+    st.write(f"File: {sel['filename']}  |  MIME: {sel['mime']}")
+    st.write(f"Caption: {sel['caption']}")
+    # Optional: show again
+    st.image(sel["path"], caption="Selected", use_container_width=True)
 
-# Button to submit the question and prompt
-# if st.button("Ask"):
-#     if question and prompt:
-#         st.write("Question:")
-#         st.write(question)
-#         st.write("Prompt:")
-#         st.write(prompt)
-
-#         # Query the LLM
-#         # llm_type = (
-#         #     "Ollama"  # Specify the LLM type (e.g., 'GPT', 'HF', 'Ollama')
-#         # )
-
-#         response = query_llm(question, prompt, key_file_path, llm_type)
-
-#         st.write("Response:")
-#         st.write(response)
-#     else:
-#         st.write("Please enter both a question and a prompt.")
-# # else:
-# # st.write("Upload PDF files and enter a question and a prompt to proceed.")
-
-# # Button to delete embedding files
-# if st.button("Delete embedding files"):
-#     npy_files_deleted = 0
-#     embedding_directory = "./"
-#     for root, dirs, files in os.walk(embedding_directory):
-#         for file in files:
-#             if file.endswith(".npy"):
-#                 os.remove(os.path.join(root, file))
-#                 npy_files_deleted += 1
-#     st.success(f"Deleted {npy_files_deleted} embedding files.")
-
-# # Button to delete output folder
-# if st.button("Delete output folder"):
-#     if os.path.exists(outputDirectory):
-#         shutil.rmtree(outputDirectory)
-#         st.success("Output folder deleted successfully.")
-#     else:
-#         st.warning("Output folder does not exist.")
-
-# Display an image from a URL
-# st.image("https://example.com/image.jpg", caption="Image from URL", use_column_width=True)
+    # Example stub: you can call your LLM here with sel['bytes'] or sel['base64']
+    # if st.button("Run LLM (stub)"):
+    #     st.info("LLM call not implemented yet.")

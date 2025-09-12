@@ -1,0 +1,62 @@
+units		metal
+dimension	3
+boundary	p p p
+atom_style	full
+newton on
+variable    	dt equal 0.0005
+
+#Read in Bottom Atoms
+read_data	structure.txt
+
+# defining some group
+group upper type 3 4
+group lower type 1 2
+
+
+
+# ------Force Fields --------
+# Interaction potential for carbon atoms
+######################## Potential defition ########################
+pair_style sw/mod maxdelcs 0.25 0.35
+pair_coeff * * tmd.sw.mod W Se
+####################################################################
+
+neighbor		2.0 bin
+neigh_modify	delay 0 one 10000
+
+delete_atoms overlap 0.4 all all
+
+
+compute csym all centro/atom 12
+compute mytemp all temp
+compute 2 all stress/atom mytemp
+compute 21 all reduce sum c_2[1]
+compute 22 all reduce sum c_2[2]
+compute 23 all reduce sum c_2[3]
+compute 24 all reduce sum c_2[4]
+compute 25 all reduce sum c_2[5]
+compute 26 all reduce sum c_2[6]
+
+compute 3 all pe/atom 
+compute 4 all reduce sum c_3
+compute 6 all pair sw/mod
+
+
+
+
+
+timestep	0.0005
+
+thermo         100
+thermo_style   custom step pe ke etotal temp c_mytemp c_6 
+
+fix            cal_nve all nve
+
+
+
+dump           mydump2 all custom 50 minimize.dump id type x y z c_csym c_2[1] c_2[2] c_2[3] c_2[4] c_2[5] c_2[6] c_3 
+
+minimize       1e-11 1e-12 5000 10000000
+
+unfix cal_nve
+undump mydump2

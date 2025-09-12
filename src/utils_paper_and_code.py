@@ -66,6 +66,47 @@ def is_llm_quota_error(exc: Exception | str) -> bool:
     return any(t in msg for t in triggers)
 
 
+def extract_candidates_from_texts(texts: list[str]) -> list[dict]:
+    """Heuristically extract composition formulas and structure keywords from texts.
+    Returns list of dicts: {formula, keywords, count, weight} sorted by weight desc.
+    """
+    import re
+    from collections import Counter, defaultdict
+
+    # Regex: tokens like LiCoO2, Co3O4, SrTiO3, etc. At least 2 elements
+    formula_pat = re.compile(r"\b(?:[A-Z][a-z]?\d*){2,}\b")
+    keyword_list = [
+        "spinel", "layered", "rocksalt", "perovskite", "monolayer",
+        "vacancy", "defect", "grain boundary", "GB", "FFT"
+    ]
+
+    formula_hits = Counter()
+    keyword_hits = Counter()
+    formula_in_text = defaultdict(set)  # formula -> set(index)
+
+    for idx, t in enumerate(texts):
+        lower = (t or "").lower()
+        for m in formula_pat.findall(t or ""):
+            formula_hits[m] += 1
+            formula_in_text[m].add(idx)
+        for kw in keyword_list:
+            if kw in lower:
+                keyword_hits[kw] += 1
+
+    candidates = []
+    for f, c in formula_hits.items():
+        # Keywords near formulas are unknown; approximate using global keyword frequency
+        kws = [kw for kw, kc in keyword_hits.items() if kc > 0]
+        # weight: formula frequency + emphasis for appearing in many separate texts (figures/pages)
+        spread = len(formula_in_text[f])
+        weight = c + 0.5 * spread + 0.25 * len(kws)
+        candidates.append({"formula": f, "keywords": kws, "count": c, "weight": weight})
+
+    # sort by weight desc, then count desc, then formula
+    candidates.sort(key=lambda d: (-d["weight"], -d["count"], d["formula"]))
+    return candidates
+
+
 def build_constraints_prompt(constraints: dict) -> str:
     """Format a constraints dictionary into a concise prompt snippet.
     Expected keys (all optional):

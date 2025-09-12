@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple
 import fitz  # PyMuPDF
 import numpy as np
 from PIL import Image
+from PIL import ImageDraw
 
 try:
     import cv2  # type: ignore
@@ -21,6 +22,25 @@ class Figure:
     image_path: str
     bbox: Tuple[float, float, float, float]
     caption: str
+    page_text: str = ""
+    is_tem: bool = False
+    tem_score: int = 0
+
+
+def _score_tem_relevance(text: str) -> Tuple[int, int]:
+    """Return (tem_hits, non_tem_hits) based on caption/page text heuristics."""
+    t = (text or "").lower()
+    tem_kw = [
+        "tem", "stem", "haadf", "hrtem", "electron microscopy", "micrograph",
+        "lattice", "atomic resolution", "diffraction", "fft", "zone axis", "angstrom", " nm"
+    ]
+    non_kw = [
+        "spectrum", "spectra", "cv ", "cyclic volt", "electrochem", "xrd", "raman",
+        "xps", "graph", "plot", "eels spectrum"
+    ]
+    tem_hits = sum(1 for k in tem_kw if k in t)
+    non_hits = sum(1 for k in non_kw if k in t)
+    return tem_hits, non_hits
 
 
 def extract_figures(pdf_path: str, out_dir: str = "_uploads/fig_extract") -> List[Figure]:
@@ -29,6 +49,7 @@ def extract_figures(pdf_path: str, out_dir: str = "_uploads/fig_extract") -> Lis
     doc = fitz.open(pdf_path)
     for pi, page in enumerate(doc):
         data = page.get_text("dict")
+        page_txt = page.get_text("text") or ""
         blocks = data.get("blocks", [])
         # Build list of text blocks for caption proximity
         text_blocks = [b for b in blocks if b.get("type") == 0]
@@ -72,8 +93,48 @@ def extract_figures(pdf_path: str, out_dir: str = "_uploads/fig_extract") -> Lis
                         best_dist = d
                         cap = "".join(span.get("text", "") for line in tb.get("lines", []) for span in line.get("spans", []))
 
-            figures.append(Figure(page_index=pi, image_path=fpath, bbox=(ix0, iy0, ix1, iy1), caption=cap.strip()))
+            fig = Figure(page_index=pi, image_path=fpath, bbox=(ix0, iy0, ix1, iy1), caption=cap.strip(), page_text=page_txt)
+            tem_hits, non_hits = _score_tem_relevance(fig.caption + "\n" + fig.page_text)
+            fig.is_tem = tem_hits > 0 and tem_hits >= non_hits
+            fig.tem_score = tem_hits - non_hits
+            figures.append(fig)
     return figures
+
+
+def crop_image(image_path: str, box: Tuple[int, int, int, int], out_dir: str = "_uploads/crops") -> str:
+    """Crop the image to box=(x, y, w, h) and save to out_dir; return path."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    img = Image.open(image_path).convert("RGB")
+    x, y, w, h = box
+    x2, y2 = max(0, x), max(0, y)
+    crop = img.crop((x2, y2, x2 + max(1, w), y2 + max(1, h)))
+    name = Path(image_path).stem + f"_crop_{x2}_{y2}_{w}_{h}.png"
+    out_path = str(Path(out_dir) / name)
+    crop.save(out_path)
+    return out_path
+
+
+def split_into_grid(image_path: str, rows: int, cols: int, out_dir: str = "_uploads/subfigs") -> List[Tuple[str, Tuple[int, int, int, int]]]:
+    """Split the image into rows x cols tiles; return list of (path, box)."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    img = Image.open(image_path).convert("RGB")
+    W, H = img.size
+    tiles: List[Tuple[str, Tuple[int, int, int, int]]] = []
+    tw, th = W // max(1, cols), H // max(1, rows)
+    for r in range(rows):
+        for c in range(cols):
+            x, y = c * tw, r * th
+            w, h = (tw if c < cols - 1 else (W - x)), (th if r < rows - 1 else (H - y))
+            path = crop_image(image_path, (x, y, w, h), out_dir=out_dir)
+            tiles.append((path, (x, y, w, h)))
+    return tiles
+
+
+def parse_subfigure_labels(caption: str) -> List[str]:
+    """Extract subfigure labels like (a), (b), (c) from caption."""
+    import re
+    labs = re.findall(r"\(([a-zA-Z])\)", caption or "")
+    return [l.lower() for l in labs]
 
 
 def hough_circles_detect(image_path: str) -> List[Tuple[float, float, float]]:
@@ -106,3 +167,42 @@ def run_tem_to_atom_coords(image_path: str) -> List[Tuple[float, float]]:
         circles = hough_circles_detect(image_path)
         return [(x, y) for (x, y, r) in circles]
 
+
+def overlay_points(image_path: str, coords: List[Tuple[float, float]], out_dir: str = "_uploads/overlays") -> str:
+    """Draw small red circles at coord locations on the image and save."""
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    img = Image.open(image_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    for (x, y) in coords:
+        r = 4
+        draw.ellipse((x - r, y - r, x + r, y + r), outline="red", width=2)
+    out_path = str(Path(out_dir) / (Path(image_path).stem + "_points.png"))
+    img.save(out_path)
+    return out_path
+
+
+def heatmap_overlay(image_path: str, coords: List[Tuple[float, float]], out_dir: str = "_uploads/overlays") -> Optional[str]:
+    """Create a simple heatmap overlay (if cv2 available); else return points overlay."""
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return overlay_points(image_path, coords, out_dir=out_dir)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    base = cv2.imread(image_path)
+    if base is None:
+        return overlay_points(image_path, coords, out_dir=out_dir)
+    h, w = base.shape[:2]
+    acc = np.zeros((h, w), dtype=np.float32)
+    for (x, y) in coords:
+        xi, yi = int(round(x)), int(round(y))
+        if 0 <= yi < h and 0 <= xi < w:
+            acc[yi, xi] += 1.0
+    acc = cv2.GaussianBlur(acc, (0, 0), sigmaX=5, sigmaY=5)
+    acc = acc / (acc.max() + 1e-6)
+    heat = (acc * 255).astype(np.uint8)
+    heat_color = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(base, 0.6, heat_color, 0.4, 0)
+    out_path = str(Path(out_dir) / (Path(image_path).stem + "_heatmap.png"))
+    cv2.imwrite(out_path, overlay)
+    return out_path

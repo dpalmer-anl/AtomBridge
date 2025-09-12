@@ -2,12 +2,53 @@
 import time
 from pathlib import Path
 import streamlit as st
+# Compatibility shim for streamlit_drawable_canvas on Streamlit>=1.49:
+# Older versions of the canvas lib call streamlit.elements.image.image_to_url,
+# which no longer exists. We provide a drop-in that stores the image in
+# Streamlit's MediaFileManager and returns a relative URL (e.g., /media/...).
+try:
+    import streamlit.elements.image as _st_image_mod  # type: ignore
+    if not hasattr(_st_image_mod, "image_to_url"):
+        import io, hashlib
+        from typing import Any
+        import PIL.Image as _PILImage
+        from PIL.Image import Image as _PILImageType
+        import numpy as _np
+        from streamlit.runtime import get_instance as _get_rt
+
+        def _ensure_pil(img: Any):
+            # If already a PIL.Image.Image
+            if isinstance(img, _PILImageType):
+                return img
+            # Try converting numpy-like arrays or other image-like objects
+            try:
+                arr = _np.array(img)
+                if arr.ndim == 2:
+                    return _PILImage.fromarray(arr)
+                return _PILImage.fromarray(arr.astype("uint8"))
+            except Exception as _e:
+                raise TypeError(f"Unsupported image type for image_to_url shim: {type(img)}") from _e
+
+        def image_to_url(img, width, clamp, channels, output_format, image_id):  # type: ignore
+            pil = _ensure_pil(img)
+            bio = io.BytesIO()
+            pil.save(bio, format="PNG")
+            data = bio.getvalue()
+            coord = image_id or f"drawable-canvas-bg-{hashlib.md5(data).hexdigest()}"
+            rt = _get_rt()
+            url = rt.media_file_mgr.add(data, "image/png", coord)
+            return url
+
+        _st_image_mod.image_to_url = image_to_url  # type: ignore[attr-defined]
+except Exception:
+    pass
 
 from src.graph import load_paper, plan_targets, synthesize_code, run_generated_code
 from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt, is_llm_quota_error
 from src.create_ASE_RAG import RAG_ASE
 from src.mp_api import mp_api_validate_from_text
-from src.figures import extract_figures, run_tem_to_atom_coords
+from src.figures import extract_figures, run_tem_to_atom_coords, crop_image, split_into_grid, parse_subfigure_labels, overlay_points, heatmap_overlay
+import streamlit.components.v1 as components
 from src.validation import compare_image_coords_to_cif
 
 
@@ -227,7 +268,7 @@ with st.sidebar:
     st.subheader("Model")
     selected_model = st.selectbox(
         "Choose model",
-        options=["gemini-2.5-pro", "gemini-2.5-flash"],
+        options=["gemini-2.5-flash", "gemini-2.5-pro"],
         index=0,
         help="Pick Pro or Flash. Planning uses Flash to save quota.",
     )
@@ -294,6 +335,8 @@ if "figures" not in st.session_state:
     st.session_state.figures = []
 if "fig_coords" not in st.session_state:
     st.session_state.fig_coords = {}
+if "figure_idx" not in st.session_state:
+    st.session_state.figure_idx = 0
 
 analyze = st.button("Analyze Paper & Suggest Prompts")
 if analyze:
@@ -313,14 +356,148 @@ if analyze:
             st.stop()
 
 if st.session_state.suggested_prompts:
-    st.subheader("Suggested Prompts (click to run)")
-    btn_cols = st.columns(len(st.session_state.suggested_prompts))
-    for i, (c, sp) in enumerate(zip(btn_cols, st.session_state.suggested_prompts)):
-        with c:
-            if st.button(sp, key=f"suggest_{i}"):
-                # Put into prompt box and run full pipeline automatically
-                st.session_state["prompt_input"] = sp
-                st.session_state["auto_exec"] = True
+    st.subheader('Suggested Prompts (click to run)')
+    # Build extended prompts list: only compositions tied to TEM figures
+    try:
+        from src.utils_paper_and_code import extract_candidates_from_texts as _extract
+        tem_texts = []
+        for f in st.session_state.figures:
+            if getattr(f, 'is_tem', False):
+                try:
+                    tem_texts.append((f.caption or '') + '\n' + (getattr(f, 'page_text', '') or ''))
+                except Exception:
+                    continue
+        tem_candidates = _extract(tem_texts) if tem_texts else []
+    except Exception:
+        tem_candidates = []
+
+    # Filter original LLM suggestions to those that mention any TEM-tied formula
+    def _mentions_any_formula(text: str, formulas: list[str]) -> bool:
+        t = (text or '').lower()
+        for f in formulas:
+            if f.lower() in t:
+                return True
+        return False
+
+    tem_formulas = [c.get('formula') for c in tem_candidates if c.get('formula')]
+    filtered_suggestions = list(st.session_state.suggested_prompts)
+    if tem_formulas:
+        filtered_suggestions = [p for p in st.session_state.suggested_prompts if _mentions_any_formula(p, tem_formulas)]
+
+    # Compose extended prompts from filtered suggestions + all TEM-tied candidates
+    extended = list(filtered_suggestions)
+    for cand in tem_candidates:
+        form = cand.get('formula')
+        if not form:
+            continue
+        kws = cand.get('keywords') or []
+        kw_text = ' '.join(sorted(set(kws) & {'spinel','layered','rocksalt','perovskite'})).strip()
+        desc = (' ' + kw_text) if kw_text else ''
+        prompt = f"Generate CIFs for {form}{desc} consistent with the paper's TEM analysis. Include reasonable variants if parameters are ambiguous."
+        if all(prompt.lower() != p.lower() for p in extended):
+            extended.append(prompt)
+
+    # Batch-generate all TEM-linked prompts
+    def _slugify(t: str) -> str:
+        import re
+        s = t.lower()
+        s = re.sub('[^a-z0-9]+', '-', s).strip('-')
+        return s[:40] if len(s) > 40 else s
+
+    cola, colb = st.columns([2,3])
+    with cola:
+        append_constraints = st.checkbox(
+            'Append constraints to all',
+            value=False,
+            help='Append current constraints (composition, lattice, defects) to each batch prompt.'
+        )
+    with colb:
+        if st.button('Generate TEM-linked CIFs (all)'):
+            if not extended:
+                st.warning('No TEM-linked prompts available. Extract figures first or analyze paper.')
+            else:
+                if st.session_state.paper_text is None:
+                    st.error('Please analyze the paper first to load text context.')
+                else:
+                    gen_count, errors = 0, []
+                    seen_tags = set()
+                    for j, prompt_text in enumerate(extended):
+                        tag = _slugify(prompt_text)
+                        if tag in seen_tags:
+                            continue
+                        seen_tags.add(tag)
+                        prompt_full = prompt_text
+                        if append_constraints:
+                            ctext = st.session_state.get('constraints_text')
+                            if ctext:
+                                prompt_full = (prompt_full + '\n\nConstraints:\n' + ctext).strip()
+                        suffix = (
+                            '\n\nInstructions: For each structure, write to a distinct CIF file with a descriptive,'
+                            f" hyphenated name that includes '{tag}' to avoid collisions."
+                        )
+                        try:
+                            with st.spinner(f'Generating CIFs for prompt {j+1}...'):
+                                _ = generate_and_fix_code_v2(
+                                    user_prompt=(prompt_full + suffix),
+                                    paper_text=st.session_state.paper_text or '',
+                                    code_model=code_model,
+                                    max_iters=3,
+                                )
+                                gen_count += 1
+                        except Exception as e:
+                            errors.append(str(e))
+                    new_cifs = [str(p) for p in Path('.').glob('*.cif')]
+                    st.session_state.last_cifs = new_cifs
+                    st.success(f'Completed generation for {gen_count} TEM-linked prompts. Found {len(new_cifs)} CIFs in working directory.')
+                    # Show CIF visuals like single-run
+                    st.subheader('Generated CIF Files (recent)')
+                    if new_cifs:
+                        for p in new_cifs:
+                            pth = Path(p)
+                            with st.expander(pth.name):
+                                try:
+                                    txt = pth.read_text(encoding='utf-8', errors='ignore')
+                                except Exception:
+                                    txt = '(binary or unreadable)'
+                                st.code(txt[:20000], language='text')
+                                if st.button(f"Show 3D unit cell ({pth.name})", key=f"show3d_recent_{pth.name}"):
+                                    render_cif_3d(str(pth), width=700, height=500, style='ballstick')
+                                with open(pth, 'rb') as f:
+                                    st.download_button(
+                                        f'Download {pth.name}', data=f, file_name=pth.name, mime='chemical/x-cif'
+                                    )
+                    else:
+                        st.info('No CIF files detected. Check STDERR for issues.')
+                    if errors:
+                        with st.expander('Errors while generating some prompts'):
+                            for e in errors:
+                                st.write(e)
+
+    # Pager/carousel over all prompts (most relevant first)
+    per_page = 4
+    if 'prompt_page' not in st.session_state:
+        st.session_state.prompt_page = 0
+    total = len(extended)
+    pages = max(1, (total + per_page - 1) // per_page)
+    nav1, nav2, nav3 = st.columns([1,1,6])
+    with nav1:
+        if st.button('◀ Prev'):
+            st.session_state.prompt_page = max(0, st.session_state.prompt_page - 1)
+    with nav2:
+        if st.button('Next ▶'):
+            st.session_state.prompt_page = min(pages - 1, st.session_state.prompt_page + 1)
+    with nav3:
+        st.caption(f"Page {st.session_state.prompt_page + 1} / {pages} — {total} prompts")
+
+    start = st.session_state.prompt_page * per_page
+    end = min(total, start + per_page)
+    cols = st.columns(max(1, end - start))
+    for i, col in enumerate(cols, start=start):
+        with col:
+            sp = extended[i]
+            if st.button(sp, key=f'prompt_ext_{i}'):
+                st.session_state['prompt_input'] = sp
+                st.session_state['auto_exec'] = True
                 st.rerun()
 else:
     st.caption("Click 'Analyze Paper & Suggest Prompts' to get suggestions, or type your own below.")
@@ -356,9 +533,9 @@ with st.expander("Specify constraints from TEM/paper"):
     gb = st.checkbox("Include grain boundary")
     gb_desc = st.text_input("Grain boundary description", disabled=not gb, placeholder="e.g., tilt GB ~5 along [10-10]")
 
-# Ensure default prompt is set before the input widget
+# Ensure prompt state exists (do not auto-fill)
 if "prompt_input" not in st.session_state:
-    st.session_state.prompt_input = DEFAULT_SEARCH_ALL_PROMPT
+    st.session_state.prompt_input = ""
 
 notes = st.text_area(
     "Your prompt (optional)",
@@ -392,6 +569,7 @@ constraints = {
     "gb_description": gb_desc.strip() if gb else None,
 }
 constraints_text = build_constraints_prompt(constraints)
+st.session_state['constraints_text'] = constraints_text
 
 final_prompt = (notes or "").strip()
 if constraints_text:
@@ -485,7 +663,9 @@ if (dry or full or auto_exec):
                         txt = Path(p).read_text(encoding="utf-8", errors="ignore")
                     except Exception:
                         txt = "(binary or unreadable)"
-                    st.code(txt[:20000], language="text")
+                    st.code(txt[:20000], language='text')
+                    if st.button(f"Show 3D unit cell ({p.name})", key=f"show3d_last_{p.name}"):
+                        render_cif_3d(str(p), width=700, height=500, style='ballstick')
                     with open(p, "rb") as f:
                         st.download_button(
                             f"Download {p.name}", data=f, file_name=p.name, mime="chemical/x-cif"
@@ -581,6 +761,8 @@ with colF1:
                 try:
                     figs = extract_figures(pdf_path)
                     st.session_state.figures = figs
+                    st.session_state.figure_idx = 0
+                    st.session_state.figures_extracted = True
                     st.success(f"Found {len(figs)} figures.")
                 except Exception as e:
                     st.error(f"Figure extraction failed: {e}")
@@ -590,23 +772,208 @@ with colF2:
         selected_cif = st.selectbox("CIF to compare", st.session_state.last_cifs)
     else:
         st.caption("Run a pipeline first to generate CIFs, or drop a CIF into repo root.")
+    # Auto-select a figure that best matches the selected CIF (LLM text-aware only)
+    if selected_cif and st.session_state.figures and st.button("Auto-select figure for CIF"):
+        from src.validation import compare_image_coords_to_cif as _cmp
+        # First attempt: LLM-based textual selection to avoid non-TEM picks
+        try:
+            from langchain.chat_models import init_chat_model as _init_chat_model
+            cands = list(st.session_state.figures)
+            if not cands:
+                raise RuntimeError("no_figs")
 
-if st.session_state.figures:
-    options = [f"Page {f.page_index+1}: {Path(f.image_path).name}" for f in st.session_state.figures]
-    idx = st.selectbox("Pick a figure", list(range(len(options))), format_func=lambda i: options[i])
-    fig = st.session_state.figures[idx]
-    st.image(fig.image_path, caption=fig.caption or "(no caption)", use_column_width=True)
+            def _desc(fig) -> str:
+                cap = (fig.caption or "").strip().replace("\n", " ")
+                pg = (getattr(fig, "page_text", "") or "").strip().replace("\n", " ")
+                pg = pg[:300]
+                hint = "TEM?yes" if getattr(fig, "is_tem", False) else "TEM?no"
+                return f"{hint} | caption: {cap[:300]} | page: {pg}"
 
-    if st.button("Detect atoms in figure"):
+            def _keywords_from_cif(path: str):
+                kws = []
+                try:
+                    from ase.io import read as ase_read
+                    atoms = ase_read(path)
+                    form = atoms.get_chemical_formula()
+                    if form:
+                        kws.append(form)
+                except Exception:
+                    pass
+                base = Path(path).stem
+                for t in base.replace('-', '_').split('_'):
+                    if t:
+                        kws.append(t)
+                return ", ".join(dict.fromkeys([k for k in kws if k]))
+
+            cif_kws = _keywords_from_cif(selected_cif)
+            model_name = "gemini-2.5-flash"
+            _llm = _init_chat_model(model_name, model_provider="google_genai", max_retries=0)
+            numbered = "\n".join([f"{i+1}. {_desc(f)}" for i, f in enumerate(cands)])
+            prompt = (
+                "You are assisting with selecting the most relevant figure for validating a crystal structure from a CIF file.\n"
+                "Pick the SINGLE best figure that is a TEM/HRTEM/STEM micrograph (not plots/graphs/XRD/spectra) and most relevant to the given structure.\n"
+                "Return only the number of the chosen item. If none are suitable TEM micrographs, return 'none'.\n\n"
+                f"Structure context (from CIF/filename): {cif_kws}\n\n"
+                "Candidate figures:\n" + numbered
+            )
+            _resp = _llm.invoke(prompt)
+            _out = str(getattr(_resp, "content", _resp)).strip().lower()
+            sel_idx = None
+            import re as _re
+            m = _re.search(r"(\d+)", _out)
+            if m:
+                sel_idx = max(1, int(m.group(1))) - 1
+            elif "none" in _out:
+                sel_idx = None
+            if sel_idx is not None and 0 <= sel_idx < len(cands):
+                pick = cands[sel_idx]
+                if getattr(pick, "is_tem", False):
+                    pool = [f for f in st.session_state.figures if getattr(f, 'is_tem', False)]
+                    try:
+                        tem_idx = pool.index(pick)
+                        st.session_state.figure_idx = tem_idx
+                        st.success(f"LLM selected figure #{sel_idx+1} as the best textual match.")
+                        # Skip heuristic-geometry stage
+                        raise SystemExit
+                    except ValueError:
+                        pass
+                else:
+                    st.info("LLM did not find a suitable TEM micrograph; no selection made.")
+                    raise SystemExit
+            else:
+                st.info("LLM indicated no suitable TEM figures; no selection made.")
+                raise SystemExit
+        except SystemExit:
+            # Selection already handled or explicitly skipped.
+            pass
+        except Exception as e:
+            st.warning(f"Auto-select (LLM) failed: {e}")
+
+tem_pool = [f for f in st.session_state.figures if getattr(f, 'is_tem', False)]
+if tem_pool:
+    options = [f"Page {f.page_index+1}: {Path(f.image_path).name}" for f in tem_pool]
+    idx = st.selectbox("Pick a figure", list(range(len(options))), index=min(st.session_state.figure_idx, len(options)-1), format_func=lambda i: options[i])
+    fig = tem_pool[idx]
+    # Show selected figure image
+    st.image(fig.image_path, caption=fig.caption or "(no caption)", use_container_width=True)
+else:
+    st.info("No relevant TEM figures found to analyze.")
+    fig = None
+
+st.markdown("Select a subfigure or crop a region to analyze")
+method = st.radio("Selection method", ["Grid split", "Manual crop"], horizontal=True) if fig is not None else None
+crop_path = None
+if fig is not None and method == "Grid split":
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            rows = st.number_input("Rows", min_value=1, max_value=6, value=2, step=1)
+        with gc2:
+            cols = st.number_input("Cols", min_value=1, max_value=6, value=2, step=1)
+        if fig is not None and st.button("Preview subfigures"):
+            tiles = split_into_grid(fig.image_path, int(rows), int(cols))
+            st.session_state["subfig_tiles"] = tiles
+        tiles = st.session_state.get("subfig_tiles")
+        if tiles:
+            idx = st.number_input("Subfigure index", min_value=0, max_value=len(tiles)-1, value=0, step=1)
+            tpath, tbox = tiles[int(idx)]
+            st.image(tpath, caption=f"Subfigure {idx}")
+            crop_path = tpath
+elif fig is not None:
+    # Manual crop: offer mouse-drawn rectangle if component is available; fallback to sliders
+    from PIL import Image as PILImage
+    im = PILImage.open(fig.image_path)
+    W, H = im.size
+    use_canvas = False
+    try:
+        from streamlit_drawable_canvas import st_canvas
+        use_canvas = True
+    except Exception:
+        use_canvas = False
+    if use_canvas:
+        st.caption("Drag to draw a bounding box; click outside to finish.")
+        canvas_w = min(900, W)
+        scale = canvas_w / float(W)
+        canvas_h = int(H * scale)
+        from PIL import Image as PIL
+        bg = PIL.open(fig.image_path).resize((canvas_w, canvas_h))
+        res = st_canvas(
+            fill_color="rgba(255,0,0,0.2)", stroke_width=3, stroke_color="red",
+            background_image=bg, update_streamlit=True, height=canvas_h, width=canvas_w,
+            drawing_mode="rect", key="canvas_crop")
+        if res.json_data and res.json_data.get("objects"):
+            rect = res.json_data["objects"][-1]
+            rx, ry, rw, rh = rect.get("left",0), rect.get("top",0), rect.get("width",0), rect.get("height",0)
+            # Map back to original image coordinates
+            x = int(rx/scale); y = int(ry/scale); w = int(rw/scale); h = int(rh/scale)
+            st.write(f"Selected box x={x}, y={y}, w={w}, h={h}")
+            if st.button("Preview crop"):
+                cpath = crop_image(fig.image_path, (x, y, w, h))
+                st.session_state["crop_preview_path"] = cpath
+    else:
+        x = st.slider("x", 0, W-1, 0)
+        y = st.slider("y", 0, H-1, 0)
+        w = st.slider("w", 1, W, min(200, W))
+        h = st.slider("h", 1, H, min(200, H))
+        # Optional overlay of crop box on full image
+        show_overlay = st.checkbox("Show crop box on full image", value=True)
+        if show_overlay:
+            try:
+                from PIL import ImageDraw
+                overlay = im.copy()
+                draw = ImageDraw.Draw(overlay)
+                draw.rectangle([int(x), int(y), int(x + w), int(y + h)], outline="red", width=3)
+                st.image(overlay, caption=f"Crop box x={x}, y={y}, w={w}, h={h}", use_container_width=True)
+            except Exception:
+                pass
+        if st.button("Preview crop"):
+            cpath = crop_image(fig.image_path, (int(x), int(y), int(w), int(h)))
+            st.session_state["crop_preview_path"] = cpath
+    if st.session_state.get("crop_preview_path"):
+        cpath = st.session_state["crop_preview_path"]
+        st.image(cpath, caption="Cropped preview", use_container_width=True)
+        crop_path = cpath
+
+    if crop_path and st.button("Detect atoms in selected region"):
         with st.spinner("Detecting atomic coordinates in image..."):
             try:
-                coords = run_tem_to_atom_coords(fig.image_path)
-                st.session_state.fig_coords[fig.image_path] = coords
+                coords = run_tem_to_atom_coords(crop_path)
+                st.session_state.fig_coords[crop_path] = coords
                 st.success(f"Detected {len(coords)} candidate atomic sites.")
+                # Overlays
+                if coords:
+                    pts = overlay_points(crop_path, coords)
+                    st.image(pts, caption="Detections overlay", use_container_width=True)
+                    if st.checkbox("Show detections heatmap", value=False):
+                        hm = heatmap_overlay(crop_path, coords)
+                        if hm:
+                            st.image(hm, caption="Detections heatmap", use_container_width=True)
             except Exception as e:
                 st.error(f"Detection failed: {e}")
 
-    coords = st.session_state.fig_coords.get(fig.image_path)
+    coords = st.session_state.fig_coords.get(crop_path or (fig.image_path if fig else None))
+    # Button to create CIF from cropped region context
+    if crop_path and st.button("Create CIF"):
+        # Build focused prompt using caption and page text
+        context = (fig.caption or "") + "\n\n" + (fig.page_text or "")
+        focus_prompt = (
+            "Focus on the structure shown in the selected subfigure/crop. "
+            "Use the caption and surrounding page text as context:\n" + context[:4000]
+        )
+        user_prompt = (final_prompt + "\n\n" + focus_prompt).strip()
+        with st.spinner("Generating ASE code and CIF from selected region..."):
+            result2 = generate_and_fix_code_v2(
+                user_prompt=user_prompt,
+                paper_text=st.session_state.paper_text or "",
+                code_model=code_model,
+                max_iters=3,
+            )
+        st.session_state.last_result = result2
+        # Refresh CIF list
+        new_cifs = [str(p) for p in Path('.').glob('*.cif')]
+        st.session_state.last_cifs = new_cifs
+        st.session_state.last_code = result2.get("code") or ""
+        st.success("CIF generation attempt finished.")
+
     if coords and selected_cif:
         if st.button("Compare detected atoms to selected CIF"):
             with st.spinner("Comparing image-derived coordinates to CIF..."):
@@ -621,6 +988,44 @@ if st.session_state.figures:
                 except Exception as e:
                     st.error(f"Comparison failed: {e}")
 
+    # Combined analysis to paper and MP
+    if crop_path and st.button("Analyze to Paper and MP"):
+        analysis_text = (fig.caption or "") + "\n\n" + (fig.page_text or "")
+        from src.mp_api import mp_api_validate_from_text as _mp_validate
+        mp_res = _mp_validate(analysis_text)
+        st.subheader("Materials Project API validation")
+        st.json(mp_res)
+        coords2 = st.session_state.fig_coords.get(crop_path)
+        if coords2 and st.session_state.last_cifs:
+            st.subheader("Image vs last generated CIFs")
+            for p in st.session_state.last_cifs:
+                try:
+                    metrics = compare_image_coords_to_cif(p, coords2)
+                    st.write(p)
+                    st.json(metrics)
+                except Exception as e:
+                    st.warning(f"Compare failed for {p}: {e}")
 
-
-
+# 3D CIF viewers using py3Dmol
+def render_cif_3d(cif_path: str, width: int = 600, height: int = 400, style: str = "stick", show_unit_cell: bool = True):
+    try:
+        import py3Dmol
+        txt = Path(cif_path).read_text(encoding="utf-8", errors="ignore")
+        view = py3Dmol.view(width=width, height=height)
+        view.addModel(txt, 'cif')
+        if style == "stick":
+            view.setStyle({"stick": {}})
+        elif style == "ballstick":
+            view.setStyle({"sphere": {"scale": 0.2}, "stick": {}})
+        else:
+            view.setStyle({"line": {}})
+        if show_unit_cell:
+            try:
+                view.addUnitCell()
+            except Exception:
+                pass
+        view.zoomTo()
+        html = view._make_html()
+        components.html(html, height=height)
+    except Exception as e:
+        st.warning(f"3D viewer unavailable: {e}")

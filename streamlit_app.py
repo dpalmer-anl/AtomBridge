@@ -2,6 +2,8 @@
 import time
 from pathlib import Path
 import streamlit as st
+import sys
+import subprocess
 # Avoid cross-drive file watcher exceptions on Windows when external libs write temp files
 try:
     st.set_option("server.fileWatcherType", "poll")
@@ -305,6 +307,8 @@ with st.sidebar:
                 st.warning("Please enter a non-empty MP API key.")
     with col_mp2:
         validate_mp_api = st.checkbox("Validate with MP API during run", value=False)
+
+    # Note: M3GNET is expected to be present via requirements. If missing, validation sections will show a tip.
     if st.button("Validate last result (MP API)"):
         if "last_result" in st.session_state and st.session_state.get("last_result") and os.getenv("MP_API_KEY"):
             plan_text = st.session_state.get("paper_text") or ""

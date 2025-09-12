@@ -43,7 +43,7 @@ def build_llm_image_payload(image_path: str, caption: str):
     }
 
 # Streamlit app
-st.title("⚛️ AtomBridge Graphical Interface")
+st.image("../AtomBridge.jpg", use_container_width=True)
 
 # Initialize session state
 if "figure_data" not in st.session_state:
@@ -147,7 +147,7 @@ if st.session_state.figure_data is not None and len(st.session_state.images) > 0
     current_image_path = images[selected_index]
 
     # Select current image for downstream LLM processing
-    if st.button("Use this image for LLM"):
+    if st.button("Use this image for post-processing"):
         st.session_state.selected_image_path = current_image_path
         st.session_state.selected_caption = captions[selected_index]
         st.session_state.selected_image_payload = build_llm_image_payload(
@@ -195,22 +195,10 @@ if st.session_state.figure_data is not None and len(st.session_state.images) > 0
         else:
             st.error("Failed to load the selected image.")
 
-# Preview the selected image payload (for downstream use)
-if st.session_state.selected_image_payload:
-    sel = st.session_state.selected_image_payload
-    st.subheader("Selected image for LLM (prepared)")
-    st.write(f"File: {sel['filename']}  |  MIME: {sel['mime']}")
-    st.write(f"Caption: {sel['caption']}")
-    st.image(sel["path"], caption="Selected", use_container_width=True)
-
-# def get_scale_from_user(image):
-#     # Implementation of scale bar measurement logic
-#     pass
-
-# def custom_select_roi(image):
-#     # Implementation of ROI selection logic
-#     pass
-
-# def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio, original_filename):
-#     # Implementation of atomic spacing measurement logic
-#     pass
+# # Preview the selected image payload (for downstream use)
+# if st.session_state.selected_image_payload:
+#     sel = st.session_state.selected_image_payload
+#     st.subheader("Selected image for LLM (prepared)")
+#     st.write(f"File: {sel['filename']}  |  MIME: {sel['mime']}")
+#     st.write(f"Caption: {sel['caption']}")
+#     st.image(sel["path"], caption="Selected", use_container_width=True)

@@ -11,83 +11,52 @@ from PIL import Image
 import io
 import base64
 
-# --- BEGIN: compatibility shim for newer Streamlit versions ---
-try:
-    from streamlit.elements import image as st_image  # type: ignore
-
-    def _image_to_url_compat(img, width=None, clamp=False, channels="RGB", output_format="PNG", image_id=None, **kwargs):
-        """
-        Recreate the removed internal API with a compatible signature.
-        Accepts PIL.Image or numpy array, resizes to 'width', converts channels,
-        returns a data URL string.
-        """
-        # Convert to PIL
-        if isinstance(img, Image.Image):
-            pil = img
-        elif isinstance(img, np.ndarray):
-            arr = img
-            if arr.dtype != np.uint8:
-                if np.issubdtype(arr.dtype, np.floating):
-                    arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
-                else:
-                    arr = arr.astype(np.uint8)
-            if arr.ndim == 2:
-                pil = Image.fromarray(arr)
-            elif arr.ndim == 3 and arr.shape[2] in (3, 4):
-                pil = Image.fromarray(arr)
-            else:
-                pil = Image.fromarray(arr[..., 0])
-        else:
-            pil = Image.open(img)
-
-        # Channel conversion
-        try:
-            if channels in ("RGB", "RGBA"):
-                pil = pil.convert(channels)
-        except Exception:
-            pass
-
-        # Resize to requested width while keeping aspect ratio
-        if width and isinstance(width, (int, float)) and width > 0 and pil.width > 0:
-            new_w = int(width)
-            new_h = max(1, int(round(pil.height * (new_w / pil.width))))
-            try:
-                pil = pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            except Exception:
-                pil = pil.resize((new_w, new_h), Image.LANCZOS)
-
-        # Encode to requested format (default PNG)
-        fmt = (output_format or "PNG").upper()
-        if fmt == "JPG":
-            fmt = "JPEG"
-        if fmt == "JPEG" and pil.mode == "RGBA":
-            pil = pil.convert("RGB")
-
-        buf = io.BytesIO()
-        pil.save(buf, format=fmt)
-        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        mime = f"image/{fmt.lower()}"
-        return f"data:{mime};base64,{b64}"
-
-    # Monkey‑patch only if missing or incompatible
-    if not hasattr(st_image, "image_to_url"):
-        st_image.image_to_url = _image_to_url_compat  # type: ignore
-    else:
-        # Replace anyway to avoid signature mismatch on newer Streamlit
-        st_image.image_to_url = _image_to_url_compat  # type: ignore
-
-except Exception:
-    # If import fails, let st_canvas try its own path.
-    pass
-# --- END: compatibility shim ---
+# --- Removed compatibility shim as it was causing display issues ---
 
 # --- helpers for Streamlit-based UI ---
 def _to_pil(img):
+    """Convert numpy array to PIL Image, ensuring proper format."""
+    if img is None:
+        return None
+    
+    # Create a copy to avoid modifying the original
+    img = np.copy(img)
+    
+    # Ensure the array is uint8
+    if img.dtype != np.uint8:
+        if np.issubdtype(img.dtype, np.floating):
+            # Normalize floating point values to 0-1 range first
+            img_min, img_max = img.min(), img.max()
+            if img_max > img_min:
+                img = (img - img_min) / (img_max - img_min)
+            img = (img * 255).astype(np.uint8)
+        else:
+            # For integer types, normalize to 0-255 range
+            img_min, img_max = img.min(), img.max()
+            if img_max > img_min:
+                img = ((img - img_min) * 255 / (img_max - img_min)).astype(np.uint8)
+            else:
+                img = img.astype(np.uint8)
+    
+    # Handle different image dimensions
     if img.ndim == 2:
-        return Image.fromarray(img)
-    if img.ndim == 3 and img.shape[2] == 3:
+        # Grayscale image - create RGB by repeating the grayscale values
+        img_rgb = np.stack([img, img, img], axis=2)
+        return Image.fromarray(img_rgb)
+    elif img.ndim == 3 and img.shape[2] == 3:
+        # Color image - check if it's BGR and convert to RGB if needed
+        # For OpenCV images, assume BGR and convert to RGB
         return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    return Image.fromarray(img[..., 0])
+    elif img.ndim == 3 and img.shape[2] == 1:
+        # Single channel 3D array
+        img_2d = img[..., 0]
+        img_rgb = np.stack([img_2d, img_2d, img_2d], axis=2)
+        return Image.fromarray(img_rgb)
+    else:
+        # Fallback - take first channel and convert to RGB
+        img_2d = img[..., 0] if img.ndim > 2 else img
+        img_rgb = np.stack([img_2d, img_2d, img_2d], axis=2)
+        return Image.fromarray(img_rgb)
 
 def _pil_to_data_url(pil_img, fmt="PNG"):
     buf = io.BytesIO()

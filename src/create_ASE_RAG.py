@@ -34,27 +34,23 @@ TOP_K = 15
 if "GOOGLE_API_KEY" not in os.environ:
     print("Warning: GOOGLE_API_KEY not set. Set it before running.", file=sys.stderr)
 
+# Chroma telemetry can error in some environments; disable it by default
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
+os.environ.setdefault("CHROMA_TELEMETRY_IMPLEMENTATION", "none")
+
 # ---- Detect ASE source ----
 def get_ase_source_path() -> Path:
-    try:
-        import ase
-        src_file = Path(ase.__file__).resolve()
-        ase_dir = src_file.parent
-        print(f"Found ASE installed at {ase_dir}")
-        return ase_dir
-    except ImportError:
-        print("ASE not installed, cloning repo instead...")
-        if not CLONE_DIR.exists():
-            subprocess.check_call(["git", "clone", "--depth", "1", GIT_URL, str(CLONE_DIR)])
-        return CLONE_DIR / "ase"
-
+    if not CLONE_DIR.exists():
+        subprocess.check_call(["git", "clone", "--depth", "1", GIT_URL, str(CLONE_DIR)])
+    return CLONE_DIR 
 # ---- Read text files ----
-INCLUDE_EXTS = {".py",  ".txt"}
+INCLUDE_EXTS = {".py", ".rst", ".md", ".txt"}
 
 def load_text_documents(base_dir: Path) -> List[Dict]:
     docs = []
     for p in base_dir.rglob("*"):
         if p.is_file() and p.suffix.lower() in INCLUDE_EXTS:
+            print("including ",p)
             try:
                 text = p.read_text(encoding="utf-8")
             except Exception:
@@ -82,7 +78,6 @@ def build_vector_store_and_retriever(docs: List[Dict]):
     if not texts:
         raise RuntimeError("No texts found to index.")
 
-    #embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001") #requires too many credits for free version
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2") #runs locally
     if Path(CHROMA_PERSIST_DIR).exists():
         print(f"Reusing cached Chroma DB at {CHROMA_PERSIST_DIR}")
@@ -92,15 +87,22 @@ def build_vector_store_and_retriever(docs: List[Dict]):
         vectordb = Chroma.from_texts(
             texts, embedding=embeddings, metadatas=metadatas, persist_directory=CHROMA_PERSIST_DIR
         )
-        vectordb.persist()
+        # Newer langchain-chroma persists automatically when a persist directory is set.
+        # Older versions expose a .persist() method. Guard for cross-version compatibility.
+        if hasattr(vectordb, "persist"):
+            try:
+                vectordb.persist()
+            except Exception:
+                # Non-fatal; continue as DB content is already materialized
+                pass
     retriever = vectordb.as_retriever(search_type="similarity", search_kwargs={"k": TOP_K})
     return retriever
 
 # ---- QA chain ----
-def make_qa_chain(retriever):
+def make_qa_chain(retriever, model_name: str = "gemini-2.5-pro"):
     from langchain.chat_models import init_chat_model
     from langchain.chains import RetrievalQA
-    llm = init_chat_model("gemini-2.5-flash", model_provider="google_genai")
+    llm = init_chat_model(model_name, model_provider="google_genai")
     qa = RetrievalQA.from_chain_type(
         llm=llm, chain_type="stuff", retriever=retriever, return_source_documents=True
     )
@@ -122,8 +124,9 @@ def make_langgraph_tool(qa_chain):
     return rag_tool
 
 
-def RAG_ASE():
-    """create ASE knowledge base from ase code found in local environment """
+def RAG_ASE(model_name: str = "gemini-2.5-pro"):
+    """create ASE knowledge base from ase code found in local environment. Use this tool 
+    to reference examples in creating ase.atoms objects."""
     ase_src = get_ase_source_path()
     if not ase_src.exists():
         raise FileNotFoundError(f"ASE source not found: {ase_src}")
@@ -131,7 +134,7 @@ def RAG_ASE():
     docs = load_text_documents(ase_src)
     print(f"Indexed {len(docs)} files.")
     retriever = build_vector_store_and_retriever(docs)
-    qa_chain = make_qa_chain(retriever)
+    qa_chain = make_qa_chain(retriever, model_name=model_name)
     rag_tool = make_langgraph_tool(qa_chain)
     return rag_tool
 

@@ -6,7 +6,7 @@ import streamlit as st
 from src.graph import load_paper, plan_targets, synthesize_code, run_generated_code
 from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt
 from src.create_ASE_RAG import RAG_ASE
-from src.mp_mcp import mp_validate_from_text
+from src.mp_api import mp_api_validate_from_text
 
 
 UPLOAD_DIR = Path("_uploads")
@@ -237,30 +237,27 @@ with st.sidebar:
             help="Used for extracting targets/plan from the paper",
         )
     st.divider()
-    st.subheader("Materials Project MCP")
-    st.caption("Optionally validate using an MCP server. See: https://glama.ai/mcp/servers/@fair2wise/materials_project_mcp")
-    default_mp_endpoint = os.getenv("MP_MCP_ENDPOINT", "")
-    mp_endpoint = st.text_input("MCP Endpoint", value=default_mp_endpoint, placeholder="http://localhost:8000")
-    mp_api_key = st.text_input("MP API key (optional)", type="password")
+    st.subheader("Materials Project API Validation")
+    st.caption("Validate via official MP API (preferred). Enter your MP API key; no server needed.")
+    mp_api_key = st.text_input("MP API key", type="password")
     col_mp1, col_mp2 = st.columns(2)
     with col_mp1:
-        if st.button("Use MP settings for this session"):
-            if mp_endpoint.strip():
-                os.environ["MP_MCP_ENDPOINT"] = mp_endpoint.strip()
-                st.success("MCP endpoint set for this session.")
+        if st.button("Use MP API key for this session"):
             if mp_api_key.strip():
                 os.environ["MP_API_KEY"] = mp_api_key.strip()
                 st.success("MP API key set for this session.")
+            else:
+                st.warning("Please enter a non-empty MP API key.")
     with col_mp2:
-        validate_mcp = st.checkbox("Validate with MCP during run", value=False)
-    if st.button("Validate last result (MCP)"):
-        if "last_result" in st.session_state and st.session_state.get("last_result") and os.getenv("MP_MCP_ENDPOINT"):
+        validate_mp_api = st.checkbox("Validate with MP API during run", value=False)
+    if st.button("Validate last result (MP API)"):
+        if "last_result" in st.session_state and st.session_state.get("last_result") and os.getenv("MP_API_KEY"):
             plan_text = st.session_state.get("paper_text") or ""
-            val = mp_validate_from_text(plan_text)
+            val = mp_api_validate_from_text(plan_text)
             st.session_state.last_result["mp_validation"] = val
             st.success("Validated last result (see Materials Project Validation section).")
         else:
-            st.warning("No last result or MCP endpoint not set.")
+            st.warning("No last result or MP API key not set.")
         code_model = st.selectbox(
             "Codegen model",
             options=["gemini-2.5-pro", "gemini-2.5-flash"],
@@ -430,9 +427,9 @@ if (dry or full or auto_exec):
                     code_model=code_model,
                     max_iters=3 if do_exec else 1,
                 )
-                # Optional MP validation
-                if 'validate_mcp' in locals() and validate_mcp and os.getenv("MP_MCP_ENDPOINT"):
-                    mp_res = mp_validate_from_text(st.session_state.paper_text or "")
+                # Optional MP API validation
+                if 'validate_mp_api' in locals() and validate_mp_api and os.getenv("MP_API_KEY"):
+                    mp_res = mp_api_validate_from_text(st.session_state.paper_text or "")
                     result["mp_validation"] = mp_res
                 # If not executing, do not run; just show the code produced in first iteration
                 if not do_exec:

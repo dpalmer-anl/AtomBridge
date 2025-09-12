@@ -791,118 +791,6 @@ with colF2:
     else:
         st.caption("Place a .cif in the repo root or generate one first to enable auto-select & comparison.")
 
-    # Guided one-click flow: LLM select -> crop -> detect -> generate -> compare
-    if selected_cif and st.session_state.figures:
-        if st.button("Guided: Auto-select -> Crop -> Detect -> Generate -> Compare"):
-            st.session_state["auto_flow_active"] = True
-            st.session_state["auto_flow_stage"] = "select"
-            st.session_state["auto_flow_cif"] = selected_cif
-
-        # Run the state machine
-        if st.session_state.get("auto_flow_active"):
-            stage = st.session_state.get("auto_flow_stage", "select")
-            try:
-                if stage == "select":
-                    # Reuse LLM selection block; set figure_idx or stop
-                    from langchain.chat_models import init_chat_model as _init_chat_model
-                    cands = list(st.session_state.figures)
-                    def _desc(fig) -> str:
-                        cap = (fig.caption or "").strip().replace("\n", " ")
-                        pg = (getattr(fig, "page_text", "") or "").strip().replace("\n", " ")
-                        pg = pg[:300]
-                        hint = "TEM?yes" if getattr(fig, "is_tem", False) else "TEM?no"
-                        return f"{hint} | caption: {cap[:300]} | page: {pg}"
-                    def _keywords_from_cif(path: str):
-                        kws = []
-                        try:
-                            from ase.io import read as ase_read
-                            atoms = ase_read(path)
-                            form = atoms.get_chemical_formula()
-                            if form:
-                                kws.append(form)
-                        except Exception:
-                            pass
-                        base = Path(path).stem
-                        for t in base.replace('-', '_').split('_'):
-                            if t:
-                                kws.append(t)
-                        return ", ".join(dict.fromkeys([k for k in kws if k]))
-                    cif_kws = _keywords_from_cif(st.session_state["auto_flow_cif"])
-                    model_name = "gemini-2.5-flash"
-                    _llm = _init_chat_model(model_name, model_provider="google_genai", max_retries=0)
-                    numbered = "\n".join([f"{i+1}. {_desc(f)}" for i, f in enumerate(cands)])
-                    prompt = (
-                        "Select the SINGLE best figure that is a TEM/HRTEM/STEM micrograph (not plots/graphs/XRD/spectra) and most relevant to the given structure.\n"
-                        "Return only the number, or 'none' if none apply.\n\n"
-                        f"Structure: {cif_kws}\n\n"
-                        "Candidate figures:\n" + numbered
-                    )
-                    _resp = _llm.invoke(prompt)
-                    _out = str(getattr(_resp, "content", _resp)).strip().lower()
-                    import re as _re
-                    m = _re.search(r"(\d+)", _out)
-                    sel_idx = max(1, int(m.group(1))) - 1 if m else None
-                    if sel_idx is None:
-                        st.warning("LLM indicated no suitable TEM figures; ending guided flow.")
-                        st.session_state["auto_flow_active"] = False
-                    else:
-                        pick = cands[sel_idx]
-                        if getattr(pick, "is_tem", False):
-                            pool = [f for f in st.session_state.figures if getattr(f, 'is_tem', False)]
-                            tem_idx = pool.index(pick)
-                            st.session_state.figure_idx = tem_idx
-                            st.session_state["auto_flow_stage"] = "crop"
-                            st.success(f"Selected figure #{sel_idx+1}. Proceed to crop below.")
-                        else:
-                            st.warning("LLM pick was not TEM; ending guided flow.")
-                            st.session_state["auto_flow_active"] = False
-                elif stage == "detect":
-                    crop_path = st.session_state.get("crop_preview_path")
-                    if not crop_path:
-                        st.info("Awaiting crop selection above...")
-                    else:
-                        with st.spinner("Detecting atomic coordinates in crop..."):
-                            coords = run_tem_to_atom_coords(crop_path)
-                            st.session_state.fig_coords[crop_path] = coords
-                        st.success(f"Detected {len(coords)} sites. Proceeding to generate CIF...")
-                        st.session_state["auto_flow_stage"] = "generate"
-                elif stage == "generate":
-                    crop_path = st.session_state.get("crop_preview_path")
-                    fig = [f for f in st.session_state.figures if getattr(f, 'is_tem', False)][st.session_state.figure_idx]
-                    context = (fig.caption or "") + "\n\n" + (fig.page_text or "")
-                    focus_prompt = (
-                        "Focus on the structure shown in the selected crop. "
-                        "Use the caption and surrounding page text as context:\n" + context[:4000]
-                    )
-                    user_prompt = (final_prompt + "\n\n" + focus_prompt).strip()
-                    with st.spinner("Generating ASE code and CIF from selected region..."):
-                        result2 = generate_and_fix_code_v2(
-                            user_prompt=user_prompt,
-                            paper_text=st.session_state.paper_text or "",
-                            code_model=code_model,
-                            max_iters=3,
-                        )
-                    st.session_state.last_result = result2
-                    new_cifs = [str(p) for p in Path('.').glob('*.cif')]
-                    st.session_state.last_cifs = new_cifs
-                    st.session_state.last_code = result2.get("code") or ""
-                    st.session_state["auto_flow_stage"] = "compare"
-                    st.success("CIF generated. Proceeding to comparison...")
-                elif stage == "compare":
-                    crop_path = st.session_state.get("crop_preview_path")
-                    coords = st.session_state.fig_coords.get(crop_path)
-                    if not coords:
-                        st.warning("No detected coordinates found for comparison.")
-                        st.session_state["auto_flow_active"] = False
-                    else:
-                        with st.spinner("Comparing image-derived coordinates to CIF..."):
-                            res = compare_image_coords_to_cif(st.session_state["auto_flow_cif"], coords)
-                        st.subheader("Guided comparison result")
-                        st.json(res)
-                        st.session_state["auto_flow_active"] = False
-                        st.success("Guided flow completed.")
-            except Exception as e:
-                st.warning(f"Guided flow error: {e}")
     # Auto-select a figure that best matches the selected CIF (LLM text-aware only)
     if selected_cif and st.session_state.figures and st.button("Auto-select figure for CIF"):
         from src.validation import compare_image_coords_to_cif as _cmp
@@ -1016,9 +904,6 @@ if fig is not None:
     if st.button("Preview crop"):
         cpath = crop_image(fig.image_path, (int(x), int(y), int(w), int(h)))
         st.session_state["crop_preview_path"] = cpath
-        # If running guided flow, advance to detection stage automatically
-        if st.session_state.get("auto_flow_active") and st.session_state.get("auto_flow_stage") == "crop":
-            st.session_state["auto_flow_stage"] = "detect"
     if st.session_state.get("crop_preview_path"):
         cpath = st.session_state["crop_preview_path"]
         st.image(cpath, caption="Cropped preview", use_container_width=True)

@@ -1,5 +1,6 @@
 import fitz  # PyMuPDF
 import re
+import os
 import pandas as pd
 from pathlib import Path
 from PIL import Image
@@ -12,127 +13,99 @@ SUBFIGURE_PADDING = 10 # Pixels to add around each detected subfigure.
 PLOT_WHITESPACE_THRESHOLD = 0.75 # (75%) Figures with more white space than this will be treated as plots.
 
 # --- Configuration ---
-pdf_path = Path("papers/lee-et-al-2020-deep-learning-enabled-strain-mapping-of-single-atom-defects-in-two-dimensional-transition-metal.pdf")
-output_folder = Path("OutputImages")
+pdf_path = Path("papers/fang-et-al-2024-mechanistic-insights-into-potassium-assistant-thermal-catalytic-oxidation-of-soot-over-single.pdf")
+output_folder = Path("OutputImages1D_new")
 output_folder.mkdir(parents=True, exist_ok=True)
 csv_path = output_folder / "figures_and_captions.csv"
 
 # --- Helper Functions ---
 
 def merge_close_bboxes(bboxes, threshold=15):
-    """Merges bounding boxes that are close to each other."""
+    """
+    Merges bounding boxes that are close to each other, both horizontally and vertically.
+    This is crucial for handling tight layouts like elemental map grids.
+    """
+    if not bboxes:
+        return []
+    
+    rects_to_merge = [fitz.Rect(bbox) for bbox in bboxes]
+    
     while True:
         merged_one = False
-        for i in range(len(bboxes)):
-            for j in range(len(bboxes) - 1, i, -1):
-                inflated_rect = bboxes[j].irect + (-threshold, -threshold, threshold, threshold)
-                if bboxes[i].intersects(inflated_rect):
-                    bboxes[i].include_rect(bboxes[j])
-                    bboxes.pop(j)
-                    merged_one = True
+        new_rects = []
+        
+        # Start with the first rectangle as a new group
+        current_group = rects_to_merge[0]
+        
+        # Iterate through the remaining rectangles
+        for i in range(1, len(rects_to_merge)):
+            rect = rects_to_merge[i]
+            
+            # Inflate the current group's bounding box to check for intersection
+            inflated_current = current_group + (-threshold, -threshold, threshold, threshold)
+            
+            if rect.intersects(inflated_current):
+                current_group.include_rect(rect)
+                merged_one = True
+            else:
+                new_rects.append(current_group)
+                current_group = rect
+        
+        new_rects.append(current_group)
+        
+        # If no merges occurred in a full pass, we are done
         if not merged_one:
             break
-    return bboxes
-
-def segment_dense_image(img_cv):
-    """Segmentation pipeline tuned for dense images like micrographs."""
-    img_h, img_w = img_cv.shape
-    
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    contrast_enhanced_img = clahe.apply(img_cv)
-    blurred = cv2.GaussianBlur(contrast_enhanced_img, (5, 5), 0)
-    
-    thresh_adaptive = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                            cv2.THRESH_BINARY_INV, 11, 2)
-    _, thresh_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    combined_thresh = cv2.bitwise_or(thresh_adaptive, thresh_otsu)
-    
-    kernel = np.ones((5, 5), np.uint8)
-    dilated_mask = cv2.dilate(combined_thresh, kernel, iterations=1)
-    
-    contours, _ = cv2.findContours(dilated_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    mask = np.zeros_like(dilated_mask)
-    for contour in contours:
-        if cv2.contourArea(contour) > 100:
-            cv2.drawContours(mask, [contour], -1, (255), thickness=cv2.FILLED)
-
-    final_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    subfigures = []
-    min_subfig_area = img_w * img_h * 0.02
-    max_subfig_area = img_w * img_h * 0.95
-
-    for contour in final_contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        if (min_subfig_area < w*h < max_subfig_area and 0.5 < (w/float(h) if h>0 else 0) < 2.0):
-            subfigures.append((x, y, w, h))
-    
-    return subfigures
-
-def segment_sparse_plot(img_cv):
-    """Segmentation pipeline tuned for sparse images like plots."""
-    img_h, img_w = img_cv.shape
-    
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    contrast_enhanced_img = clahe.apply(img_cv)
-    blurred = cv2.GaussianBlur(contrast_enhanced_img, (5, 5), 0)
-    
-    thresh_adaptive = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                            cv2.THRESH_BINARY_INV, 51, 2)
-    _, thresh_otsu = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    combined_thresh = cv2.bitwise_or(thresh_adaptive, thresh_otsu)
-    
-    kernel = np.ones((5, 5), np.uint8)
-    dilated_mask = cv2.dilate(combined_thresh, kernel, iterations=1)
-    
-    contours, _ = cv2.findContours(dilated_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    mask = np.zeros_like(dilated_mask)
-    for contour in contours:
-        if cv2.contourArea(contour) > 20:
-            cv2.drawContours(mask, [contour], -1, (255), thickness=cv2.FILLED)
-
-    final_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    subfigures = []
-    min_subfig_area = img_w * img_h * 0.02
-    max_subfig_area = img_w * img_h * 0.95
-
-    for contour in final_contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        if (min_subfig_area < w*h < max_subfig_area and 0.3 < (w/float(h) if h>0 else 0) < 3.0):
-            subfigures.append((x, y, w, h))
             
-    return subfigures
+        rects_to_merge = new_rects
+        
+    return rects_to_merge
+
 
 def segment_figure(image_bytes):
-    """Intelligently chooses the correct segmentation pipeline based on white space percentage."""
+    """
+    Intelligently segments a figure image into subfigures using a single pipeline.
+    It's designed to handle both sparse plots and dense, gridded images.
+    """
     try:
         img_cv = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
-        
-        _, thresh = cv2.threshold(img_cv, 240, 255, cv2.THRESH_BINARY)
-        white_pixels = cv2.countNonZero(thresh)
-        total_pixels = img_cv.shape[0] * img_cv.shape[1]
-        white_space_ratio = white_pixels / total_pixels
-        
-        if white_space_ratio > PLOT_WHITESPACE_THRESHOLD:
-            # print(f"INFO: Detected sparse plot (white space: {white_space_ratio:.2%}). Using plot pipeline.")
-            subfigures = segment_sparse_plot(img_cv)
-        else:
-            # print(f"INFO: Detected dense image (white space: {white_space_ratio:.2%}). Using image pipeline.")
-            subfigures = segment_dense_image(img_cv)
-
-        padded_subfigures = []
         img_h, img_w = img_cv.shape
-        for x, y, w, h in subfigures:
-            x_pad = max(0, x - SUBFIGURE_PADDING)
-            y_pad = max(0, y - SUBFIGURE_PADDING)
-            w_pad = min(img_w - x_pad, w + (2 * SUBFIGURE_PADDING))
-            h_pad = min(img_h - y_pad, h + (2 * SUBFIGURE_PADDING))
-            padded_subfigures.append((x_pad, y_pad, w_pad, h_pad))
 
-        padded_subfigures.sort(key=lambda b: (b[1], b[0]))
-        return padded_subfigures
+        # Adaptive thresholding to handle lighting variations
+        blurred = cv2.GaussianBlur(img_cv, (5, 5), 0)
+        thresh_adaptive = cv2.adaptiveThreshold(blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                                cv2.THRESH_BINARY_INV, 25, 2)
+        
+        # Find contours
+        contours, _ = cv2.findContours(thresh_adaptive, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Filter and get bounding boxes
+        min_subfig_area = img_w * img_h * 0.01
+        raw_bboxes = [cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > min_subfig_area]
+        
+        # Merge close bounding boxes to group related elements
+        merged_bboxes = merge_close_bboxes(raw_bboxes)
 
+        # Final check and filtering
+        subfigures = []
+        min_area_final = img_w * img_h * 0.02
+        max_subfig_area = img_w * img_h * 0.95
+        
+        for bbox in merged_bboxes:
+            x, y, w, h = bbox
+            if min_area_final < w * h < max_subfig_area:
+                # Add padding
+                x_pad = max(0, x - SUBFIGURE_PADDING)
+                y_pad = max(0, y - SUBFIGURE_PADDING)
+                w_pad = min(img_w - x_pad, w + (2 * SUBFIGURE_PADDING))
+                h_pad = min(img_h - y_pad, h + (2 * SUBFIGURE_PADDING))
+                
+                subfigures.append((x_pad, y_pad, w_pad, h_pad))
+
+        # Sort subfigures from top-to-bottom and left-to-right
+        subfigures.sort(key=lambda b: (b[1], b[0]))
+        return subfigures
+        
     except Exception as e:
         print(f"Error during contour segmentation: {e}")
         return []

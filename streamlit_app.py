@@ -991,74 +991,34 @@ else:
     st.info("No relevant TEM figures found to analyze.")
     fig = None
 
-st.markdown("Select a subfigure or crop a region to analyze")
-method = st.radio("Selection method", ["Grid split", "Manual crop"], horizontal=True) if fig is not None else None
+st.subheader("Crop region to analyze")
 crop_path = None
-if fig is not None and method == "Grid split":
-        gc1, gc2 = st.columns(2)
-        with gc1:
-            rows = st.number_input("Rows", min_value=1, max_value=6, value=2, step=1)
-        with gc2:
-            cols = st.number_input("Cols", min_value=1, max_value=6, value=2, step=1)
-        if fig is not None and st.button("Preview subfigures"):
-            tiles = split_into_grid(fig.image_path, int(rows), int(cols))
-            st.session_state["subfig_tiles"] = tiles
-        tiles = st.session_state.get("subfig_tiles")
-        if tiles:
-            idx = st.number_input("Subfigure index", min_value=0, max_value=len(tiles)-1, value=0, step=1)
-            tpath, tbox = tiles[int(idx)]
-            st.image(tpath, caption=f"Subfigure {idx}")
-            crop_path = tpath
-elif fig is not None:
-    # Manual crop: offer mouse-drawn rectangle if component is available; fallback to sliders
+if fig is not None:
+    # Slider-based crop (robust, no canvas)
     from PIL import Image as PILImage
     im = PILImage.open(fig.image_path)
     W, H = im.size
-    use_canvas = False
-    try:
-        from streamlit_drawable_canvas import st_canvas
-        use_canvas = True
-    except Exception:
-        use_canvas = False
-    if use_canvas:
-        st.caption("Drag to draw a bounding box; click outside to finish.")
-        canvas_w = min(900, W)
-        scale = canvas_w / float(W)
-        canvas_h = int(H * scale)
-        from PIL import Image as PIL
-        bg = PIL.open(fig.image_path).resize((canvas_w, canvas_h))
-        res = st_canvas(
-            fill_color="rgba(255,0,0,0.2)", stroke_width=3, stroke_color="red",
-            background_image=bg, update_streamlit=True, height=canvas_h, width=canvas_w,
-            drawing_mode="rect", key="canvas_crop")
-        if res.json_data and res.json_data.get("objects"):
-            rect = res.json_data["objects"][-1]
-            rx, ry, rw, rh = rect.get("left",0), rect.get("top",0), rect.get("width",0), rect.get("height",0)
-            # Map back to original image coordinates
-            x = int(rx/scale); y = int(ry/scale); w = int(rw/scale); h = int(rh/scale)
-            st.write(f"Selected box x={x}, y={y}, w={w}, h={h}")
-            if st.button("Preview crop"):
-                cpath = crop_image(fig.image_path, (x, y, w, h))
-                st.session_state["crop_preview_path"] = cpath
-    else:
-        x = st.slider("x", 0, W-1, 0)
-        y = st.slider("y", 0, H-1, 0)
-        w = st.slider("w", 1, W, min(200, W))
-        h = st.slider("h", 1, H, min(200, H))
-        # Optional overlay of crop box on full image
-        show_overlay = st.checkbox("Show crop box on full image", value=True)
-        if show_overlay:
-            try:
-                from PIL import ImageDraw
-                overlay = im.copy()
-                draw = ImageDraw.Draw(overlay)
-                draw.rectangle([int(x), int(y), int(x + w), int(y + h)], outline="red", width=3)
-                st.image(overlay, caption=f"Crop box x={x}, y={y}, w={w}, h={h}", use_container_width=True)
-            except Exception:
-                pass
-        if st.button("Preview crop"):
-            cpath = crop_image(fig.image_path, (int(x), int(y), int(w), int(h)))
-            st.session_state["crop_preview_path"] = cpath
+    x = st.slider("x", 0, max(1, W - 1), 0)
+    y = st.slider("y", 0, max(1, H - 1), 0)
+    w = st.slider("w", 1, W, min(200, W))
+    h = st.slider("h", 1, H, min(200, H))
+    # Optional overlay of crop box on full image
+    show_overlay = st.checkbox("Show crop box on full image", value=True)
+    if show_overlay:
+        try:
+            from PIL import ImageDraw
+            overlay = im.copy()
+            draw = ImageDraw.Draw(overlay)
+            draw.rectangle([int(x), int(y), int(x + w), int(y + h)], outline="red", width=3)
+            st.image(overlay, caption=f"Crop box x={x}, y={y}, w={w}, h={h}", use_container_width=True)
+        except Exception:
+            pass
+    if st.button("Preview crop"):
+        cpath = crop_image(fig.image_path, (int(x), int(y), int(w), int(h)))
+        st.session_state["crop_preview_path"] = cpath
+        # If running guided flow, advance to detection stage automatically
+        if st.session_state.get("auto_flow_active") and st.session_state.get("auto_flow_stage") == "crop":
+            st.session_state["auto_flow_stage"] = "detect"
     if st.session_state.get("crop_preview_path"):
         cpath = st.session_state["crop_preview_path"]
         st.image(cpath, caption="Cropped preview", use_container_width=True)

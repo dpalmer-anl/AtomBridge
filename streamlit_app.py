@@ -12,28 +12,39 @@ try:
         import io, hashlib
         from typing import Any
         import PIL.Image as _PILImage
-        from PIL.Image import Image as _PILImageType
         import numpy as _np
         from streamlit.runtime import get_instance as _get_rt
 
-        def _ensure_pil(img: Any):
-            # If already a PIL.Image.Image
-            if isinstance(img, _PILImageType):
-                return img
-            # Try converting numpy-like arrays or other image-like objects
+        def _to_png_bytes(img: Any) -> bytes:
+            # Try treating it as a PIL image first
+            try:
+                bio = io.BytesIO()
+                img.save(bio, format="PNG")
+                return bio.getvalue()
+            except Exception:
+                pass
+            # Try converting from numpy-like
             try:
                 arr = _np.array(img)
                 if arr.ndim == 2:
-                    return _PILImage.fromarray(arr)
-                return _PILImage.fromarray(arr.astype("uint8"))
+                    pil = _PILImage.fromarray(arr)
+                elif arr.ndim == 3:
+                    if arr.dtype != _np.uint8:
+                        arr = _np.clip(arr, 0, 255).astype(_np.uint8)
+                    # Drop alpha if present for PNG RGB
+                    if arr.shape[2] == 4:
+                        arr = arr[:, :, :3]
+                    pil = _PILImage.fromarray(arr)
+                else:
+                    raise TypeError(f"Unsupported array shape: {arr.shape}")
+                bio = io.BytesIO()
+                pil.save(bio, format="PNG")
+                return bio.getvalue()
             except Exception as _e:
                 raise TypeError(f"Unsupported image type for image_to_url shim: {type(img)}") from _e
 
         def image_to_url(img, width, clamp, channels, output_format, image_id):  # type: ignore
-            pil = _ensure_pil(img)
-            bio = io.BytesIO()
-            pil.save(bio, format="PNG")
-            data = bio.getvalue()
+            data = _to_png_bytes(img)
             coord = image_id or f"drawable-canvas-bg-{hashlib.md5(data).hexdigest()}"
             rt = _get_rt()
             url = rt.media_file_mgr.add(data, "image/png", coord)
@@ -768,10 +779,17 @@ with colF1:
                     st.error(f"Figure extraction failed: {e}")
 with colF2:
     selected_cif = None
-    if st.session_state.last_cifs:
-        selected_cif = st.selectbox("CIF to compare", st.session_state.last_cifs)
+    # Prefer last run's CIFs; otherwise list all CIFs in working directory
+    cif_candidates = list(st.session_state.get("last_cifs") or [])
+    if not cif_candidates:
+        try:
+            cif_candidates = [str(p) for p in Path('.').glob('*.cif')]
+        except Exception:
+            cif_candidates = []
+    if cif_candidates:
+        selected_cif = st.selectbox("CIF to compare", sorted(cif_candidates))
     else:
-        st.caption("Run a pipeline first to generate CIFs, or drop a CIF into repo root.")
+        st.caption("Place a .cif in the repo root or generate one first to enable auto-select & comparison.")
     # Auto-select a figure that best matches the selected CIF (LLM text-aware only)
     if selected_cif and st.session_state.figures and st.button("Auto-select figure for CIF"):
         from src.validation import compare_image_coords_to_cif as _cmp

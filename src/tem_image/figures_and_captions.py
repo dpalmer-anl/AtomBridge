@@ -132,7 +132,7 @@ try:
     figure_data = process_pdf(doc)
 
     # Save mapping to CSV
-    pd.DataFrame(figure_data).to_csv(csv_path, index=False)
+    pd.DataFrame(figure_data).to_csv(csv_path, index=False, encoding="utf-8")
     print(f"Successfully extracted {len(figure_data)} images and captions to {csv_path}.")
 
 except FileNotFoundError:

@@ -4,6 +4,15 @@ from pathlib import Path
 import streamlit as st
 import sys
 import subprocess
+import os
+
+# Force UTF-8 I/O to avoid Windows charmap encode/decode errors (e.g., '≈')
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 # Avoid cross-drive file watcher exceptions on Windows when external libs write temp files
 try:
     st.set_option("server.fileWatcherType", "poll")
@@ -48,7 +57,9 @@ try:
                 pil.save(bio, format="PNG")
                 return bio.getvalue()
             except Exception as _e:
-                raise TypeError(f"Unsupported image type for image_to_url shim: {type(img)}") from _e
+                raise TypeError(
+                    f"Unsupported image type for image_to_url shim: {type(img)}"
+                ) from _e
 
         def image_to_url(img, width, clamp, channels, output_format, image_id):  # type: ignore
             data = _to_png_bytes(img)
@@ -60,6 +71,37 @@ try:
         _st_image_mod.image_to_url = image_to_url  # type: ignore[attr-defined]
 except Exception:
     pass
+
+# Helper: load logo and auto-trim surrounding white space, then scale to target height
+def _load_cropped_logo(path: Path, target_height: int = 2000):  # Tripled from 120
+    try:
+        from PIL import Image as _PImage
+        import numpy as _np2
+        im = _PImage.open(path).convert("RGBA")
+        arr = _np2.array(im)
+        # Build mask of non-background: use alpha or near-white threshold
+        if arr.shape[2] == 4:
+            mask = arr[:, :, 3] > 5
+        else:
+            rgb = arr[:, :, :3]
+            mask = (rgb < 245).any(axis=2)
+        coords = _np2.argwhere(mask)
+        if coords.size == 0:
+            crop = im
+        else:
+            y0, x0 = coords.min(0)
+            y1, x1 = coords.max(0) + 1
+            # small padding
+            pad = 4
+            x0 = max(0, x0 - pad); y0 = max(0, y0 - pad)
+            x1 = min(im.width, x1 + pad); y1 = min(im.height, y1 + pad)
+            crop = im.crop((x0, y0, x1, y1))
+        if target_height and crop.height > 0:
+            new_w = int(round(crop.width * (target_height / crop.height)))
+            crop = crop.resize((max(1, new_w), target_height))
+        return crop
+    except Exception:
+        return None
 
 from src.graph import load_paper, plan_targets, synthesize_code, run_generated_code
 from src.utils_paper_and_code import suggest_prompts_from_paper, extract_code, run_code, build_constraints_prompt, is_llm_quota_error
@@ -265,8 +307,25 @@ def generate_and_fix_code_v2(user_prompt: str, paper_text: str, code_model: str,
 
 
 st.set_page_config(page_title="Atombridge", layout="wide")
-st.title("Atombridge")
-st.caption("STEM to CIF")
+# Show branded logo (cropped, banner-sized) if available; fallback to text
+_logo_paths = [
+    Path("assets/atombridge_logo.png"),  # preferred high-res
+    Path("assets/atombridge_logo.jpg"),
+    Path("assets/AtomBridgeLogo.png"),
+    Path("assets/AtomBridge.png"),
+    Path("assets/AtomBridge.jpg"),
+]
+_logo = next((p for p in _logo_paths if p.exists()), None)
+if _logo:
+    # Scale the cropped logo larger to occupy banner space while retaining clarity
+    _cropped = _load_cropped_logo(_logo, target_height=320)
+    if _cropped is not None:
+        st.image(_cropped, use_container_width=True)
+    else:
+        st.image(str(_logo), use_container_width=True)
+else:
+    st.title("AtomBridge")
+    st.caption("Experimental Structures, Computational Insight")
 
 with st.sidebar:
     st.header("Environment")
@@ -293,36 +352,7 @@ with st.sidebar:
     # Effective models
     plan_model = "gemini-2.5-flash"
     code_model = selected_model
-    st.divider()
-    st.subheader("Materials Project API Validation")
-    st.caption("Validate via official MP API (preferred). Enter your MP API key; no server needed.")
-    mp_api_key = st.text_input("MP API key", type="password")
-    col_mp1, col_mp2 = st.columns(2)
-    with col_mp1:
-        if st.button("Use MP API key for this session"):
-            if mp_api_key.strip():
-                os.environ["MP_API_KEY"] = mp_api_key.strip()
-                st.success("MP API key set for this session.")
-            else:
-                st.warning("Please enter a non-empty MP API key.")
-    with col_mp2:
-        validate_mp_api = st.checkbox("Validate with MP API during run", value=False)
-
-    # Note: M3GNET is expected to be present via requirements. If missing, validation sections will show a tip.
-    if st.button("Validate last result (MP API)"):
-        if "last_result" in st.session_state and st.session_state.get("last_result") and os.getenv("MP_API_KEY"):
-            plan_text = st.session_state.get("paper_text") or ""
-            val = mp_api_validate_from_text(plan_text)
-            st.session_state.last_result["mp_validation"] = val
-            st.success("Validated last result (see Materials Project Validation section).")
-        else:
-            st.warning("No last result or MP API key not set.")
-        code_model = st.selectbox(
-            "Codegen model",
-            options=["gemini-2.5-pro", "gemini-2.5-flash"],
-            index=["gemini-2.5-pro", "gemini-2.5-flash"].index(code_model),
-            help="Used by ASE RAG to generate Python code",
-        )
+    # (MP API validation temporarily disabled)
 
 st.subheader("Select a paper")
 source = st.radio("PDF source", ["Upload", "From papers/"], horizontal=True)
@@ -1043,48 +1073,86 @@ if fig is not None:
         st.image(cpath, caption="Cropped preview", use_container_width=True)
         crop_path = cpath
 
-    if crop_path and st.button("Detect atoms in selected region"):
-        with st.spinner("Detecting atomic coordinates in image..."):
-            try:
-                coords = run_tem_to_atom_coords(crop_path)
-                st.session_state.fig_coords[crop_path] = coords
-                st.success(f"Detected {len(coords)} candidate atomic sites.")
-                # Overlays
-                if coords:
-                    pts = overlay_points(crop_path, coords)
-                    st.image(pts, caption="Detections overlay", use_container_width=True)
-                    if st.checkbox("Show detections heatmap", value=False):
-                        hm = heatmap_overlay(crop_path, coords)
-                        if hm:
-                            st.image(hm, caption="Detections heatmap", use_container_width=True)
-            except Exception as e:
-                st.error(f"Detection failed: {e}")
+if crop_path and st.button("Detect atoms in selected region"):
+    with st.spinner("Detecting atomic coordinates in image..."):
+        try:
+            coords = run_tem_to_atom_coords(crop_path)
+            st.session_state.fig_coords[crop_path] = coords
+            st.success(f"Detected {len(coords)} candidate atomic sites.")
+            # Overlays
+            if coords:
+                pts = overlay_points(crop_path, coords)
+                st.image(pts, caption="Detections overlay", use_container_width=True)
+                if st.checkbox("Show detections heatmap", value=False):
+                    hm = heatmap_overlay(crop_path, coords)
+                    if hm:
+                        st.image(hm, caption="Detections heatmap", use_container_width=True)
+        except Exception as e:
+            st.error(f"Detection failed: {e}")
 
-    # STEM lattice analysis using peak-based method (nm per pixel input)
-    if crop_path:
-        st.subheader("STEM lattice analysis")
-        nm_per_px = st.number_input("Scale (nm per pixel)", min_value=0.0001, max_value=10.0, value=0.05, step=0.005, format="%.4f")
-        c1, c2 = st.columns(2)
-        with c1:
-            run_lattice = st.button("Analyze lattice (STEM)")
-        with c2:
-            quick_min_cif = st.button("Write minimal CIF from lattice")
-        if run_lattice or quick_min_cif:
-            try:
-                from src.stem_analysis import measure_lattice_vectors, minimal_cif_from_lattice
-                res_lat = measure_lattice_vectors(crop_path, nm_per_px)
-                st.session_state["last_lattice"] = res_lat
-                st.success(f"a={res_lat['a_nm']:.4f} nm, b={res_lat['b_nm']:.4f} nm, gamma={res_lat['gamma_deg']:.2f} deg; atoms={res_lat['n_atoms']}")
-                if res_lat.get("overlay_path"):
-                    st.image(res_lat["overlay_path"], caption="Lattice detection overlay", use_container_width=True)
-                if quick_min_cif:
-                    out_name = Path(crop_path).with_suffix("").name + "_lattice.cif"
-                    out_path = minimal_cif_from_lattice(res_lat['a_nm'], res_lat['b_nm'], res_lat['gamma_deg'], out_name)
-                    st.success(f"Wrote minimal CIF: {out_path}")
-                    with open(out_path, "rb") as f:
-                        st.download_button(f"Download {Path(out_path).name}", data=f, file_name=Path(out_path).name, mime="chemical/x-cif")
-            except Exception as e:
-                st.warning(f"Lattice analysis failed: {e}")
+    # STEM image post-processing (ritesh workflow UI with steps)
+    if fig is not None:
+        st.subheader("Post-process selected image")
+        try:
+            import cv2
+            from src.image_workflow_streamlit import (
+                get_scale_from_user_streamlit as _scale_ui,
+                custom_select_roi_streamlit as _roi_ui,
+                measure_atomic_spacing_realspace as _measure,
+            )
+        except Exception as e:
+            st.warning(f"Image workflow unavailable: {e}")
+        else:
+            img_gray = cv2.imread(fig.image_path, cv2.IMREAD_GRAYSCALE)
+            if img_gray is None:
+                st.error("Failed to load image for analysis.")
+            else:
+                # Step toggles and selection notice
+                if st.button("Use this image for post-processing"):
+                    st.session_state.selected_image_path = fig.image_path
+                if st.session_state.get("selected_image_path") == fig.image_path:
+                    st.success(f"Selected: {Path(fig.image_path).name} for LLM processing.")
+                    cbtn1, cbtn2 = st.columns(2)
+                    with cbtn1:
+                        if st.button("Measure Scale Bar"):
+                            st.session_state["scale_mode"] = True
+                            st.session_state["roi_mode"] = False
+                    with cbtn2:
+                        if st.button("Select ROI"):
+                            st.session_state["roi_mode"] = True
+                            st.session_state["scale_mode"] = False
+
+                    # Show scale bar UI
+                    if st.session_state.get("scale_mode"):
+                        px_nm = _scale_ui(img_gray, canvas_key=f"scale_canvas_{Path(fig.image_path).name}")
+                        if px_nm:
+                            st.session_state.pixel_to_nm = px_nm
+                            st.success(f"Calculated pixel-to-nm ratio: {px_nm:.6f}")
+
+                    # Show ROI UI
+                    if st.session_state.get("roi_mode"):
+                        roi = _roi_ui(img_gray, canvas_key=f"roi_canvas_{Path(fig.image_path).name}")
+                        if roi is not None:
+                            st.session_state.roi = roi
+                            st.success(f"Selected ROI: {roi}")
+
+                    # Analyze when both available
+                    if st.session_state.get("pixel_to_nm") and st.session_state.get("roi"):
+                        x, y, w, h = st.session_state.roi
+                        img_roi = img_gray[y : y + h, x : x + w]
+                        res = _measure(img_roi, st.session_state.pixel_to_nm)
+                        if isinstance(res, dict) and all(k in res for k in ["a_nm", "b_nm", "gamma_deg"]):
+                            st.session_state["last_lattice"] = res
+                            # Write minimal CIF
+                            from src.stem_analysis import minimal_cif_from_lattice as _min_cif
+                            out_name = Path(fig.image_path).stem + "_lattice.cif"
+                            out_path = _min_cif(res["a_nm"], res["b_nm"], res["gamma_deg"], out_name)
+                            st.session_state["last_image_cif"] = out_path
+                            st.success(f"Wrote minimal CIF: {out_path}")
+                            with open(out_path, "rb") as f:
+                                st.download_button(
+                                    f"Download {Path(out_path).name}", data=f, file_name=Path(out_path).name, mime="chemical/x-cif"
+                                )
 
     coords = st.session_state.fig_coords.get(crop_path or (fig.image_path if fig else None))
     # Button to create CIF from cropped region context
@@ -1136,6 +1204,26 @@ if fig is not None:
         st.session_state.last_code = result2.get("code") or ""
         st.success("CIF generation attempt finished.")
 
+    # CIF-to-CIF comparison scoped to image-derived CIF and selected text CIF only
+    img_cif = st.session_state.get("last_image_cif")
+    if img_cif and st.session_state.last_cifs:
+        # pick the most recent text CIF (exclude the image cif path)
+        text_cifs = [p for p in st.session_state.last_cifs if p != img_cif]
+        if text_cifs:
+            chosen_text_cif = st.selectbox("Text-derived CIF to compare", text_cifs, index=len(text_cifs)-1)
+            if st.button("Compare image CIF to text CIF"):
+                from src.validation import compare_cif_lattices as _cmp_cif
+                try:
+                    res = _cmp_cif(img_cif, chosen_text_cif)
+                    st.subheader("CIF vs CIF (lattice) comparison")
+                    st.json(res)
+                    if res.get("pass"):
+                        st.success("Within tolerance.")
+                    else:
+                        st.warning("Outside tolerance – check constraints or regenerate.")
+                except Exception as e:
+                    st.error(f"CIF comparison failed: {e}")
+
     if coords and selected_cif:
         if st.button("Compare detected atoms to selected CIF"):
             with st.spinner("Comparing image-derived coordinates to CIF..."):
@@ -1170,23 +1258,7 @@ if fig is not None:
                 except Exception as e:
                     st.info(f"M3GNET validation not available: {e}")
 
-    # Combined analysis to paper and MP
-    if crop_path and st.button("Analyze to Paper and MP"):
-        analysis_text = (fig.caption or "") + "\n\n" + (fig.page_text or "")
-        from src.mp_api import mp_api_validate_from_text as _mp_validate
-        mp_res = _mp_validate(analysis_text)
-        st.subheader("Materials Project API validation")
-        st.json(mp_res)
-        coords2 = st.session_state.fig_coords.get(crop_path)
-        if coords2 and st.session_state.last_cifs:
-            st.subheader("Image vs last generated CIFs")
-            for p in st.session_state.last_cifs:
-                try:
-                    metrics = compare_image_coords_to_cif(p, coords2)
-                    st.write(p)
-                    st.json(metrics)
-                except Exception as e:
-                    st.warning(f"Compare failed for {p}: {e}")
+    # (MP combined analysis temporarily disabled)
 
 # 3D CIF viewers using py3Dmol
 def render_cif_3d(cif_path: str, width: int = 600, height: int = 400, style: str = "stick", show_unit_cell: bool = True):

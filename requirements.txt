@@ -15,14 +15,17 @@ streamlit-cropper>=0.2.2
 py3Dmol>=2.0.4
 PyMuPDF>=1.24.10,<1.25
 opencv-python>=4.10.0,<5
-numpy>=1.26,<2.1
+# TensorFlow 2.12 (Windows, Py3.10) requires numpy<=1.24.3
+numpy>=1.22,<=1.24.3
 Pillow>=10,<11
 scikit-learn>=1.4,<2
 scikit-image>=0.22,<0.25
-ase>=3.22.1,<4
+scipy>=1.10,<2
+matplotlib>=3.8,<4
 # M3GNET + pymatgen for relaxation validation
 # Relax pin so pip can resolve platform wheels more easily
-pymatgen>=2023.11,<2025
-m3gnet==0.2.4
-tensorflow==2.12.1
-spglib>=2.0.2
+# Optional heavy deps (managed via conda auto-install when first used)
+# pymatgen>=2023.11,<2025
+# m3gnet==0.2.4
+# tensorflow==2.12.1
+# spglib>=2.0.2

@@ -162,7 +162,11 @@ def main():
     q = "Write a python script that constructs an ase.atoms object of a MoS2 monolayer with a S vacancy. \
         define the ase.atoms object as atoms and nothing else"
     res = rag_tool(q)
-    print("Answer:\n", res["answer"])
+    try:
+        print("Answer:\n", res["answer"])  # ensure UTF-8-safe output
+    except Exception:
+        ans = (str(res.get("answer", "")).encode("utf-8", errors="ignore").decode("utf-8"))
+        print("Answer:\n", ans)
     print("Sources:")
     for s in res["sources"]:
         print("-", s["source"], "chunk", s["chunk"])

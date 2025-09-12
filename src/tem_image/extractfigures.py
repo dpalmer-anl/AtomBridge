@@ -204,7 +204,7 @@ try:
         df = pd.DataFrame(figure_data)
         # Sort final output by page and then by figure title/label for consistency
         df = df.sort_values(by=['page', 'figure_title', 'subfigure_label'])
-        df.to_csv(csv_path, index=False)
+        df.to_csv(csv_path, index=False, encoding="utf-8")
         print(f"Γ£à Successfully extracted {len(df)} figures/subfigures to {csv_path}.")
     else:
         print("ΓÜá∩╕Å No figures were extracted. Check the PDF path and content.")

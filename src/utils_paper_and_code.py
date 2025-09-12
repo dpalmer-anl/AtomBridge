@@ -26,7 +26,13 @@ def run_code(code: str) -> tuple[str, str, int]:
         f.write(code)
         f.flush()
         result = subprocess.run(["python", f.name], capture_output=True, text=True)
-    return result.stdout, result.stderr, result.returncode
+    # Ensure outputs are handled as UTF-8 to avoid charmap errors on Windows
+    try:
+        out = result.stdout.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
+        err = result.stderr.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
+    except Exception:
+        out, err = result.stdout, result.stderr
+    return out, err, result.returncode
 
 
 def suggest_prompts_from_paper(paper_text: str, model_name: str = "gemini-2.5-flash") -> list[str]:

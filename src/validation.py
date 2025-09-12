@@ -66,3 +66,27 @@ def compare_image_coords_to_cif(cif_path: str, image_coords: List[Tuple[float, f
         "pass": passed,
     }
 
+
+def compare_cif_lattices(cif1: str, cif2: str, tol_len: float = 0.15, tol_ang: float = 5.0) -> Dict[str, Any]:
+    """Compare lattice parameters of two CIFs.
+    Returns per-parameter differences and pass/fail if within tolerances:
+    - tol_len: relative tolerance on a,b,c (fraction)
+    - tol_ang: absolute tolerance on alpha,beta,gamma in degrees
+    """
+    a1 = ase_read(cif1)
+    a2 = ase_read(cif2)
+    c1 = a1.get_cell_lengths_and_angles()
+    c2 = a2.get_cell_lengths_and_angles()
+    aL = {"a": c1[0], "b": c1[1], "c": c1[2], "alpha": c1[3], "beta": c1[4], "gamma": c1[5]}
+    bL = {"a": c2[0], "b": c2[1], "c": c2[2], "alpha": c2[3], "beta": c2[4], "gamma": c2[5]}
+    diffs = {
+        "a_rel": abs(aL["a"] - bL["a"]) / max(1e-6, bL["a"]),
+        "b_rel": abs(aL["b"] - bL["b"]) / max(1e-6, bL["b"]),
+        "c_rel": abs(aL["c"] - bL["c"]) / max(1e-6, bL["c"]),
+        "alpha_abs": abs(aL["alpha"] - bL["alpha"]),
+        "beta_abs": abs(aL["beta"] - bL["beta"]),
+        "gamma_abs": abs(aL["gamma"] - bL["gamma"]),
+    }
+    pass_len = all(diffs[k] <= tol_len for k in ["a_rel", "b_rel", "c_rel"])
+    pass_ang = all(diffs[k] <= tol_ang for k in ["alpha_abs", "beta_abs", "gamma_abs"])
+    return {"status": "ok", "diffs": diffs, "pass": bool(pass_len and pass_ang)}

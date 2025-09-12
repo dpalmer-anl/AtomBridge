@@ -186,7 +186,9 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio, original_filename):
     
     # 2. Find Atom Centers using Local Maxima Peak Finding
     min_dist = 5
-    coordinates = peak_local_max(img_enhanced, min_distance=min_dist, threshold_rel=0.5, exclude_border=True)
+    # --- CHANGE: Increased threshold to be more selective for bright atoms ---
+    # This helps ignore dimmer atoms in complex structures like SrTiO3
+    coordinates = peak_local_max(img_enhanced, min_distance=min_dist, threshold_rel=0.6, exclude_border=True)
 
     if len(coordinates) < 10:
         print(f"Detection failed. Found only {len(coordinates)} atoms. Try a larger ROI or check image contrast.")
@@ -270,7 +272,7 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio, original_filename):
     # 8. Visualization
     img_with_detections = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     for x, y in coords:
-        # --- CHANGE: Set circle color to blue (BGR format) ---
+        # --- Set circle color to blue (BGR format) ---
         cv2.circle(img_with_detections, (int(x), int(y)), 3, (255, 0, 0), 1, lineType=cv2.LINE_AA)
     
     center_atom_idx = np.argmin(np.linalg.norm(coords - np.mean(coords, axis=0), axis=1))
@@ -308,7 +310,7 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio, original_filename):
 
 # --- MAIN EXECUTION ---
 if __name__ == '__main__':
-    image_path = 'OutputImages3D/Page5_Figure_5_a.png' 
+    image_path = 'OutputImages1D_new/Page3_Figure_2_l.png' 
 
     try:
         # Load the original image in grayscale for analysis

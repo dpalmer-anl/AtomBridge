@@ -224,7 +224,7 @@ with st.sidebar:
     st.divider()
     st.markdown("- Ensure ASE is installed locally.\n- First run may build a local Chroma DB.")
     st.divider()
-        st.subheader("Model")
+    st.subheader("Model")
     selected_model = st.selectbox(
         "Choose model",
         options=["gemini-2.5-pro", "gemini-2.5-flash"],

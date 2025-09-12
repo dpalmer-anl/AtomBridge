@@ -14,6 +14,18 @@ from src.validation import compare_image_coords_to_cif
 UPLOAD_DIR = Path("_uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# Default "search all" prompt text for non-coders
+DEFAULT_SEARCH_ALL_PROMPT = (
+    "I am interested in investigating the structures defined in this paper using atomistic simulation. "
+    "This paper contains TEM results with structural information. Determine the structures of interest in this paper. "
+    "The structures of interest should be related to the main hypothesis of the paper. "
+    "Next, construct ase.atoms objects for the systems of interest. "
+    "Write a python script that constructs the ase.atoms objects for the systems of interest. "
+    "This python script should create each ase.atoms object and write the object to a CIF file in the current working directory with a descriptive filename and .cif extension using the ase.io.write(<filename>,atoms_object,format='vasp'). "
+    "Note these ase.atoms objects will be the starting point of a simulation (either DFT or MD). "
+    "In the event there are certain degrees of freedom that are unclear or poorly defined in the paper, it may be useful to produce structures that sweep over several reasonable values."
+)
+
 
 def save_uploaded_pdf(uploaded_file) -> str:
     dest = UPLOAD_DIR / uploaded_file.name
@@ -335,17 +347,17 @@ with st.expander("Specify constraints from TEM/paper"):
     sg = st.text_input("Space group (symbol or number)", placeholder="e.g., P6_3/mmc or 194")
     c1, c2, c3 = st.columns(3)
     with c1:
-        a_val = st.number_input("a ()", min_value=0.0, value=0.0, step=0.01)
         a_val = st.number_input("a (Angstrom)", min_value=0.0, value=0.0, step=0.01)
+        alpha_val = st.number_input("alpha (deg)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
     with c2:
-        b_val = st.number_input("b ()", min_value=0.0, value=0.0, step=0.01)
         b_val = st.number_input("b (Angstrom)", min_value=0.0, value=0.0, step=0.01)
+        beta_val = st.number_input("beta (deg)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
     with c3:
-        c_val = st.number_input("c ()", min_value=0.0, value=0.0, step=0.01)
         c_val = st.number_input("c (Angstrom)", min_value=0.0, value=0.0, step=0.01)
+        gamma_val = st.number_input("gamma (deg)", min_value=0.0, max_value=180.0, value=0.0, step=0.1)
 
-    d_text = st.text_area("d-spacings (, comma or space separated)", placeholder="e.g., 2.46, 1.42, 1.23")
     d_text = st.text_area("d-spacings (Angstroms, comma or space separated)", placeholder="e.g., 2.46, 1.42, 1.23")
+    sc1, sc2, sc3 = st.columns(3)
     with sc1:
         scx = st.number_input("Supercell Nx", min_value=1, value=1, step=1)
     with sc2:
@@ -360,6 +372,10 @@ with st.expander("Specify constraints from TEM/paper"):
     gb = st.checkbox("Include grain boundary")
     gb_desc = st.text_input("Grain boundary description", disabled=not gb, placeholder="e.g., tilt GB ~5 along [10-10]")
 
+# Ensure default prompt is set before the input widget
+if "prompt_input" not in st.session_state:
+    st.session_state.prompt_input = DEFAULT_SEARCH_ALL_PROMPT
+
 notes = st.text_area(
     "Your prompt (optional)",
     key="prompt_input",
@@ -370,7 +386,6 @@ notes = st.text_area(
 parsed_d = []
 if d_text.strip():
     try:
-        # split by comma or whitespace
         for tok in d_text.replace(",", " ").split():
             parsed_d.append(float(tok))
     except Exception:
@@ -621,27 +636,5 @@ if st.session_state.figures:
                         st.warning("Outside margin of error - consider refining constraints or code.")
                 except Exception as e:
                     st.error(f"Comparison failed: {e}")
-
-# Default ""search all"" prompt text for non-coders
-DEFAULT_SEARCH_ALL_PROMPT = (
-    "I am interested in investigating the structures defined in this paper using atomistic simulation. "
-    "This paper contains TEM results with structural information. Determine the structures of interest in this paper. "
-    "The structures of interest should be related to the main hypothesis of the paper. "
-    "Next, construct ase.atoms objects for the systems of interest. "
-    "Write a python script that constructs the ase.atoms objects for the systems of interest. "
-    "This python script should create each ase.atoms object and write the object to a CIF file in the current working directory with a descriptive filename and .cif extension using the ase.io.write(<filename>,atoms_object,format='vasp'). "
-    "Note these ase.atoms objects will be the starting point of a simulation (either DFT or MD). "
-    "In the event there are certain degrees of freedom that are unclear or poorly defined in the paper, it may be useful to produce structures that sweep over several reasonable values."
-)
-
-if \"prompt_input\" not in st.session_state:
-    st.session_state.prompt_input = DEFAULT_SEARCH_ALL_PROMPT
-
-
-
-
-
-
-
 
 

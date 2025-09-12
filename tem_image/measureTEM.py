@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial import KDTree
 from sklearn.cluster import DBSCAN
 from skimage.feature import peak_local_max
+import os
 
 # --- Global variables for mouse callback ---
 ref_points = []
@@ -26,14 +27,14 @@ def draw_line_callback(event, x, y, flags, param):
         if drawing:
             # Create a copy to draw the temporary line in real-time
             temp_image = image.copy()
-            cv2.line(temp_image, ref_points[0], (x, y), (0, 0, 255), 2) # Red line
+            cv2.line(temp_image, ref_points[0], (x, y), (0, 0, 255), 2, lineType=cv2.LINE_AA) # Red line
             cv2.imshow("Draw Scale Bar", temp_image)
 
     elif event == cv2.EVENT_LBUTTONUP:
         ref_points.append((x, y))
         drawing = False
         # Draw the final line on the original image clone
-        cv2.line(image, ref_points[0], ref_points[1], (0, 0, 255), 2) # Red line
+        cv2.line(image, ref_points[0], ref_points[1], (0, 0, 255), 2, lineType=cv2.LINE_AA) # Red line
         cv2.imshow("Draw Scale Bar", image)
 
 def get_scale_from_user(image):
@@ -155,7 +156,7 @@ def custom_select_roi(image):
         temp_image = clone.copy()
         if roi_rect is not None and roi_rect[2] > 0 and roi_rect[3] > 0:
             (x, y, w, h) = [int(v) for v in roi_rect]
-            cv2.rectangle(temp_image, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.rectangle(temp_image, (x, y), (x + w, y + h), (0, 255, 0), 2, lineType=cv2.LINE_AA)
             handles = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
             for hx, hy in handles:
                 cv2.circle(temp_image, (hx, hy), HANDLE_SIZE, (0, 0, 255), -1)
@@ -174,12 +175,10 @@ def custom_select_roi(image):
     return None
 
 
-def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
+def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio, original_filename):
     """
     Measures atomic lattice vectors from a TEM image using a universal method
     that adapts to different lattice types. Uses peak finding for atom detection.
-    NOTE: Requires scikit-learn (`pip install scikit-learn`) and
-          scikit-image (`pip install scikit-image`)
     """
     # 1. Preprocess the Image - CLAHE is great for enhancing local contrast
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -271,15 +270,23 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
     # 8. Visualization
     img_with_detections = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     for x, y in coords:
-        cv2.circle(img_with_detections, (int(x), int(y)), 3, (0, 0, 255), 1)
+        # --- CHANGE: Set circle color to blue (BGR format) ---
+        cv2.circle(img_with_detections, (int(x), int(y)), 3, (255, 0, 0), 1, lineType=cv2.LINE_AA)
     
     center_atom_idx = np.argmin(np.linalg.norm(coords - np.mean(coords, axis=0), axis=1))
     start_point = tuple(coords[center_atom_idx].astype(int))
     end_point_a = tuple((coords[center_atom_idx] + vec_a).astype(int))
     end_point_b = tuple((coords[center_atom_idx] + vec_b).astype(int))
-    cv2.arrowedLine(img_with_detections, start_point, end_point_a, (0, 255, 0), 2)
-    cv2.arrowedLine(img_with_detections, start_point, end_point_b, (0, 255, 255), 2)
+    cv2.arrowedLine(img_with_detections, start_point, end_point_a, (0, 255, 0), 2, line_type=cv2.LINE_AA)
+    cv2.arrowedLine(img_with_detections, start_point, end_point_b, (0, 255, 255), 2, line_type=cv2.LINE_AA)
 
+    # --- NEW: Save the final analysis image ---
+    base, ext = os.path.splitext(original_filename)
+    output_filename = f"{base}_analysis.png"
+    cv2.imwrite(output_filename, img_with_detections)
+    print(f"\nSaved analysis image to: {output_filename}")
+
+    # 9. Display the plot
     plt.figure(figsize=(18, 6))
     plt.subplot(1, 3, 1)
     plt.imshow(img, cmap='gray')
@@ -301,7 +308,7 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
 
 # --- MAIN EXECUTION ---
 if __name__ == '__main__':
-    image_path = 'OutputImage.png' 
+    image_path = 'OutputImages3D/Page5_Figure_5_a.png' 
 
     try:
         # Load the original image in grayscale for analysis
@@ -309,7 +316,7 @@ if __name__ == '__main__':
         if original_img_gray is None:
             raise FileNotFoundError
 
-        # --- FIX: Create a color version for UI operations ---
+        # Create a color version for UI operations
         original_img_bgr = cv2.cvtColor(original_img_gray, cv2.COLOR_GRAY2BGR)
 
         # Pass the BGR image to the UI function
@@ -324,9 +331,10 @@ if __name__ == '__main__':
             if roi is None or roi[2] == 0 or roi[3] == 0:
                  print("\nNo ROI selected or invalid ROI. Exiting.")
             else:
-                # IMPORTANT: Crop the ROI from the original GRAYSCALE image for analysis
+                # Crop the ROI from the original GRAYSCALE image for analysis
                 img_roi_gray = original_img_gray[roi[1]:roi[1]+roi[3], roi[0]:roi[0]+roi[2]]
-                measure_atomic_spacing_realspace(img_roi_gray, pixel_to_nm)
+                # Pass the original filename to the analysis function for saving
+                measure_atomic_spacing_realspace(img_roi_gray, pixel_to_nm, image_path)
         else:
             print("\nScale measurement cancelled or failed. Exiting.")
 

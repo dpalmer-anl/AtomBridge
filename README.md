@@ -1,4 +1,4 @@
-﻿# Atombridge — STEM/TEM to CIF, fast
+﻿# AtomBridge — STEM/TEM to CIF
 
 Atombridge is a Streamlit app that helps you go from a PDF (with STEM/TEM figures) or a STEM/TEM image crop to valid crystal structures in CIF format. It combines:
 

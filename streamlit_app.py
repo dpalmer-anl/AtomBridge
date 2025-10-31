@@ -919,28 +919,46 @@ if regen:
 
 st.divider()
 st.subheader("Analyze Figures from Paper")
+
+# Add option for manual PDF page extraction
+fig_extract_method = st.radio(
+    "Figure extraction method:",
+    ["🤖 Automatic (detect figures)", "✋ Manual (select region from PDF page)"],
+    horizontal=True,
+    key="fig_extraction_method"
+)
+
 colF1, colF2 = st.columns(2)
 with colF1:
-    if st.button("Extract Figures"):
-        if not pdf_path:
-            st.error("Select or upload a PDF above first.")
-        else:
-            with st.spinner("Extracting figures and captions..."):
-                try:
-                    # Try improved extractor first; fall back to baseline
+    if "🤖" in fig_extract_method:
+        if st.button("Extract Figures"):
+            if not pdf_path:
+                st.error("Select or upload a PDF above first.")
+            else:
+                with st.spinner("Extracting figures and captions..."):
                     try:
-                        from src.figures import extract_figures_v2 as _extract_v2
-                        figs = _extract_v2(pdf_path)
-                        if not figs:
-                            raise RuntimeError("no_figs_v2")
-                    except Exception:
-                        figs = extract_figures(pdf_path)
-                    st.session_state.figures = figs
-                    st.session_state.figure_idx = 0
-                    st.session_state.figures_extracted = True
-                    st.success(f"Found {len(figs)} figures.")
-                except Exception as e:
-                    st.error(f"Figure extraction failed: {e}")
+                        # Try improved extractor first; fall back to baseline
+                        try:
+                            from src.figures import extract_figures_v2 as _extract_v2
+                            figs = _extract_v2(pdf_path)
+                            if not figs:
+                                raise RuntimeError("no_figs_v2")
+                        except Exception:
+                            figs = extract_figures(pdf_path)
+                        st.session_state.figures = figs
+                        st.session_state.figure_idx = 0
+                        st.session_state.figures_extracted = True
+                        st.success(f"Found {len(figs)} figures.")
+                    except Exception as e:
+                        st.error(f"Figure extraction failed: {e}")
+    else:
+        # Manual crop from PDF page
+        if st.button("📄 Load PDF for manual selection"):
+            if not pdf_path:
+                st.error("Select or upload a PDF above first.")
+            else:
+                st.session_state.manual_pdf_mode = True
+                st.session_state.manual_pdf_path = pdf_path
 with colF2:
     selected_cif = None
     # Prefer last run's CIFs; otherwise list all CIFs in working directory
@@ -954,6 +972,123 @@ with colF2:
         selected_cif = st.selectbox("CIF to compare", sorted(cif_candidates))
     else:
         st.caption("Place a .cif in the repo root or generate one first to enable auto-select & comparison.")
+
+# Handle manual PDF page selection and cropping
+if st.session_state.get("manual_pdf_mode") and st.session_state.get("manual_pdf_path"):
+    st.subheader("📄 Manual PDF Page Selection")
+    pdf_path_manual = st.session_state.manual_pdf_path
+
+    # Get number of pages in PDF
+    try:
+        import fitz  # PyMuPDF
+        doc = fitz.open(pdf_path_manual)
+        num_pages = len(doc)
+
+        # Page selector
+        page_num = st.number_input("Select PDF page number:", min_value=1, max_value=num_pages, value=1, step=1, key="manual_pdf_page")
+
+        # Render the selected page
+        page = doc[page_num - 1]  # 0-indexed
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom for better quality
+        img_data = pix.tobytes("png")
+
+        from PIL import Image as PILImage
+        import io
+        pil_img = PILImage.open(io.BytesIO(img_data))
+
+        # Save temp image
+        manual_page_path = UPLOAD_DIR / f"manual_page_{page_num}.png"
+        pil_img.save(manual_page_path)
+
+        st.image(manual_page_path, caption=f"Page {page_num} of {num_pages}", use_container_width=True)
+
+        # Crop selection
+        st.write("**Draw a red rectangle** around the image/figure region you want to analyze.")
+
+        from streamlit_drawable_canvas import st_canvas
+        W, H = pil_img.size
+        disp_w = min(900, W)
+        scale_ratio = W / disp_w if disp_w > 0 else 1.0
+        disp_h = int(round(H / scale_ratio)) if scale_ratio > 0 else H
+
+        canvas_result = st_canvas(
+            background_image=pil_img,
+            width=disp_w,
+            height=disp_h,
+            drawing_mode="rect",
+            stroke_color="#ff0000",
+            fill_color="rgba(255, 0, 0, 0.15)",
+            stroke_width=3,
+            update_streamlit=True,
+            key=f"manual_pdf_canvas_page_{page_num}",
+        )
+
+        roi = None
+        if canvas_result.json_data and canvas_result.json_data.get("objects"):
+            for obj in reversed(canvas_result.json_data["objects"]):
+                if obj.get("type") == "rect":
+                    left = float(obj.get("left", 0.0))
+                    top = float(obj.get("top", 0.0))
+                    width = float(obj.get("width", 0.0)) * float(obj.get("scaleX", 1.0))
+                    height = float(obj.get("height", 0.0)) * float(obj.get("scaleY", 1.0))
+
+                    x = int(round(left * scale_ratio))
+                    y = int(round(top * scale_ratio))
+                    w = int(round(width * scale_ratio))
+                    h = int(round(height * scale_ratio))
+
+                    x = max(0, min(x, W - 1))
+                    y = max(0, min(y, H - 1))
+                    w = max(1, min(w, W - x))
+                    h = max(1, min(h, H - y))
+
+                    roi = (x, y, w, h)
+                    st.info(f"📐 Selected region: x={x}, y={y}, width={w}, height={h} px")
+                    break
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("✅ Use this region", disabled=(roi is None)):
+                if roi:
+                    # Crop and save
+                    cpath = crop_image(str(manual_page_path), roi)
+                    # Create a fake figure object for compatibility
+                    from dataclasses import dataclass
+                    @dataclass
+                    class ManualFigure:
+                        image_path: str
+                        caption: str
+                        page_index: int
+                        page_text: str = ""
+                        is_tem: bool = True
+                        is_manual_crop: bool = True  # Flag to identify manual crops
+
+                    manual_fig = ManualFigure(
+                        image_path=cpath,
+                        caption=f"Manual crop from page {page_num}",
+                        page_index=page_num - 1,
+                        is_manual_crop=True
+                    )
+                    st.session_state.figures = [manual_fig]
+                    st.session_state.figure_idx = 0
+                    st.session_state.manual_pdf_mode = False  # Exit manual mode
+                    st.success(f"✅ Cropped region saved! Proceeding with analysis...")
+                    st.rerun()
+        with col2:
+            if st.button("🔄 Change page"):
+                st.rerun()
+        with col3:
+            if st.button("❌ Cancel manual mode"):
+                st.session_state.manual_pdf_mode = False
+                st.rerun()
+
+        doc.close()
+
+    except Exception as e:
+        st.error(f"Failed to load PDF page: {e}")
+        if st.button("❌ Exit manual mode"):
+            st.session_state.manual_pdf_mode = False
+            st.rerun()
 
     # Auto-select a figure that best matches the selected CIF (LLM text-aware only)
     if selected_cif and st.session_state.figures and st.button("Auto-select figure for CIF"):
@@ -1045,32 +1180,158 @@ else:
 
 st.subheader("Crop region to analyze")
 crop_path = None
-if fig is not None:
-    # Slider-based crop (robust, no canvas)
+# Check if this is a manual PDF crop - if so, skip this section
+is_manual_crop = getattr(fig, 'is_manual_crop', False) if fig else False
+
+if is_manual_crop and fig is not None:
+    # Manual crops already selected their region - skip to post-processing
+    st.info("ℹ️ **Manual crop mode:** Your selected region is ready. Proceed to 'Post-process selected image' below to measure scale bar and select ROI.")
+    crop_path = None  # Don't set crop_path, go straight to post-processing
+elif fig is not None:
     from PIL import Image as PILImage
+    from PIL import ImageDraw
+    from streamlit_drawable_canvas import st_canvas
+    
     im = PILImage.open(fig.image_path)
     W, H = im.size
-    x = st.slider("x", 0, max(1, W - 1), 0)
-    y = st.slider("y", 0, max(1, H - 1), 0)
-    w = st.slider("w", 1, W, min(200, W))
-    h = st.slider("h", 1, H, min(200, H))
-    # Optional overlay of crop box on full image
-    show_overlay = st.checkbox("Show crop box on full image", value=True)
-    if show_overlay:
-        try:
-            from PIL import ImageDraw
-            overlay = im.copy()
-            draw = ImageDraw.Draw(overlay)
-            draw.rectangle([int(x), int(y), int(x + w), int(y + h)], outline="red", width=3)
-            st.image(overlay, caption=f"Crop box x={x}, y={y}, w={w}, h={h}", use_container_width=True)
-        except Exception:
-            pass
-    if st.button("Preview crop"):
-        cpath = crop_image(fig.image_path, (int(x), int(y), int(w), int(h)))
-        st.session_state["crop_preview_path"] = cpath
+    
+    # Selection method toggle
+    crop_method = st.radio(
+        "Selection method:",
+        ["🖱️ Drag Rectangle (Fast)", "🎚️ Sliders (Precise)"],
+        index=0,
+        horizontal=True,
+        key="crop_selection_method",
+        help="Drag Rectangle: Click and drag to select region. Sliders: Use controls for exact pixel positioning."
+    )
+    
+    roi = None
+    use_canvas = "🖱️" in crop_method
+    
+    if use_canvas:
+        st.write("**Draw a red rectangle** around the region you want to analyze.")
+        
+        # Scale image for display (max 900px width to prevent canvas rendering issues)
+        disp_w = min(900, W)
+        scale_ratio = W / disp_w if disp_w > 0 else 1.0
+        disp_h = int(round(H / scale_ratio)) if scale_ratio > 0 else H
+        
+        # Create interactive canvas
+        canvas_result = st_canvas(
+            background_image=im,
+            width=disp_w,
+            height=disp_h,
+            drawing_mode="rect",
+            stroke_color="#ff0000",
+            fill_color="rgba(255, 0, 0, 0.15)",
+            stroke_width=3,
+            update_streamlit=True,
+            key=f"fig_crop_canvas_{fig.page_index}_{Path(fig.image_path).stem}",
+        )
+        
+        # Extract rectangle coordinates from canvas
+        if canvas_result.json_data and canvas_result.json_data.get("objects"):
+            for obj in reversed(canvas_result.json_data["objects"]):
+                if obj.get("type") == "rect":
+                    # Get display coordinates
+                    left = float(obj.get("left", 0.0))
+                    top = float(obj.get("top", 0.0))
+                    width = float(obj.get("width", 0.0)) * float(obj.get("scaleX", 1.0))
+                    height = float(obj.get("height", 0.0)) * float(obj.get("scaleY", 1.0))
+                    
+                    # Convert back to original image coordinates
+                    x = int(round(left * scale_ratio))
+                    y = int(round(top * scale_ratio))
+                    w = int(round(width * scale_ratio))
+                    h = int(round(height * scale_ratio))
+                    
+                    # Clamp to image bounds
+                    x = max(0, min(x, W - 1))
+                    y = max(0, min(y, H - 1))
+                    w = max(1, min(w, W - x))
+                    h = max(1, min(h, H - y))
+                    
+                    roi = (x, y, w, h)
+                    st.info(f"📐 Selected region: x={x}, y={y}, width={w}, height={h} px")
+                    break
+            
+            if roi is None:
+                st.warning("⬆️ Draw a rectangle on the image above to select a region")
+        
+        # Action buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            preview_btn = st.button("Preview Crop", disabled=(roi is None), key="canvas_preview_btn")
+            if preview_btn and roi:
+                cpath = crop_image(fig.image_path, roi)
+                st.session_state["crop_preview_path"] = cpath
+                st.success("✅ Crop preview created!")
+                st.rerun()
+        with col2:
+            if st.button("Clear Selection", key="canvas_clear_btn"):
+                st.session_state.pop("crop_preview_path", None)
+                st.rerun()
+    
+    else:  # Slider mode for precise control
+        st.write("**Use sliders** to define the crop region with exact pixel values.")
+        
+        # Initialize slider values from session state if available
+        default_x = st.session_state.get("slider_crop_x", 0)
+        default_y = st.session_state.get("slider_crop_y", 0)
+        default_w = st.session_state.get("slider_crop_w", min(200, W))
+        default_h = st.session_state.get("slider_crop_h", min(200, H))
+        
+        x = st.slider("x (left edge)", 0, max(1, W - 1), default_x, key="slider_x")
+        y = st.slider("y (top edge)", 0, max(1, H - 1), default_y, key="slider_y")
+        w = st.slider("width", 1, W, default_w, key="slider_w")
+        h = st.slider("height", 1, H, default_h, key="slider_h")
+        
+        # Clamp width and height to not exceed image bounds
+        w = min(w, W - x)
+        h = min(h, H - y)
+        
+        roi = (x, y, w, h)
+        
+        # Store in session state for persistence
+        st.session_state["slider_crop_x"] = x
+        st.session_state["slider_crop_y"] = y
+        st.session_state["slider_crop_w"] = w
+        st.session_state["slider_crop_h"] = h
+        
+        # Show preview overlay on full image
+        show_overlay = st.checkbox("Show crop box overlay on full image", value=True, key="slider_show_overlay")
+        if show_overlay:
+            try:
+                overlay = im.copy()
+                draw = ImageDraw.Draw(overlay)
+                draw.rectangle([x, y, x + w, y + h], outline="red", width=4)
+                # Add dimension labels
+                from PIL import ImageFont
+                try:
+                    # Try to use a nicer font, fallback to default
+                    font = ImageFont.truetype("arial.ttf", 16)
+                except Exception:
+                    font = ImageFont.load_default()
+                draw.text((x + 5, y + 5), f"{w}×{h} px", fill="red", font=font)
+                st.image(overlay, caption=f"Crop region: x={x}, y={y}, w={w}, h={h}", use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not render overlay: {e}")
+        
+        # Preview button
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Preview Crop", key="slider_preview_btn"):
+                cpath = crop_image(fig.image_path, roi)
+                st.session_state["crop_preview_path"] = cpath
+                st.success("✅ Crop preview created!")
+        with col2:
+            if st.button("Clear Preview", key="slider_clear_btn"):
+                st.session_state.pop("crop_preview_path", None)
+    
+    # Display cropped preview if available
     if st.session_state.get("crop_preview_path"):
         cpath = st.session_state["crop_preview_path"]
-        st.image(cpath, caption="Cropped preview", use_container_width=True)
+        st.image(cpath, caption="✂️ Cropped region preview", use_container_width=True)
         crop_path = cpath
 
 if crop_path and st.button("Detect atoms in selected region"):
@@ -1090,69 +1351,319 @@ if crop_path and st.button("Detect atoms in selected region"):
         except Exception as e:
             st.error(f"Detection failed: {e}")
 
-    # STEM image post-processing (ritesh workflow UI with steps)
-    if fig is not None:
-        st.subheader("Post-process selected image")
-        try:
-            import cv2
-            from src.image_workflow_streamlit import (
-                get_scale_from_user_streamlit as _scale_ui,
-                custom_select_roi_streamlit as _roi_ui,
-                measure_atomic_spacing_realspace as _measure,
-            )
-        except Exception as e:
-            st.warning(f"Image workflow unavailable: {e}")
+# STEM image post-processing (ritesh workflow UI with steps)
+# This section is now OUTSIDE the "Detect atoms" button block so it's always accessible
+if fig is not None or crop_path:
+    st.subheader("Post-process selected image")
+    try:
+        import cv2
+        from src.image_workflow_streamlit import (
+            get_scale_from_user_streamlit as _scale_ui,
+            custom_select_roi_streamlit as _roi_ui,
+            measure_atomic_spacing_realspace as _measure,
+        )
+    except Exception as e:
+        st.warning(f"Image workflow unavailable: {e}")
+    else:
+        # Determine which image to use (cropped or full)
+        image_selection_options = []
+        if fig is not None:
+            image_selection_options.append(f"📄 Full image: {Path(fig.image_path).name}")
+        if crop_path:
+            image_selection_options.append(f"✂️ Cropped region")
+
+        if len(image_selection_options) > 1:
+            selected_option = st.radio("Select image to analyze:", image_selection_options, key="image_option_select")
+            use_crop = "✂️" in selected_option
+        elif crop_path:
+            use_crop = True
         else:
+            use_crop = False
+
+        # Load the selected image
+        if use_crop and crop_path:
+            working_image_path = crop_path
+            img_gray = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE)
+        elif fig is not None:
+            working_image_path = fig.image_path
             img_gray = cv2.imread(fig.image_path, cv2.IMREAD_GRAYSCALE)
-            if img_gray is None:
-                st.error("Failed to load image for analysis.")
-            else:
-                # Step toggles and selection notice
-                if st.button("Use this image for post-processing"):
-                    st.session_state.selected_image_path = fig.image_path
-                if st.session_state.get("selected_image_path") == fig.image_path:
-                    st.success(f"Selected: {Path(fig.image_path).name} for LLM processing.")
-                    cbtn1, cbtn2 = st.columns(2)
-                    with cbtn1:
-                        if st.button("Measure Scale Bar"):
-                            st.session_state["scale_mode"] = True
-                            st.session_state["roi_mode"] = False
-                    with cbtn2:
-                        if st.button("Select ROI"):
+        else:
+            img_gray = None
+            working_image_path = None
+
+        if img_gray is None:
+            st.error("Failed to load image for analysis.")
+        else:
+            # Step toggles and selection notice
+            if st.button("Use this image for post-processing"):
+                st.session_state.selected_image_path = working_image_path
+            if st.session_state.get("selected_image_path") == working_image_path:
+                st.success(f"Selected: {Path(working_image_path).name} for measurement workflow.")
+
+                # Workflow status indicators
+                has_scale = st.session_state.get("pixel_to_nm") is not None
+                has_roi = st.session_state.get("roi") is not None
+
+                st.info("📋 **Workflow Steps:** 1️⃣ Measure Scale Bar → 2️⃣ Select ROI → 3️⃣ Analyze Lattice")
+
+                cbtn1, cbtn2 = st.columns(2)
+                with cbtn1:
+                    if st.button("1️⃣ Measure Scale Bar"):
+                        st.session_state["scale_mode"] = True
+                        st.session_state["roi_mode"] = False
+                with cbtn2:
+                    # Disable ROI button if scale bar not measured
+                    roi_disabled = not has_scale
+                    if roi_disabled:
+                        st.button("2️⃣ Select ROI", disabled=True, help="⚠️ Measure scale bar first!")
+                    else:
+                        if st.button("2️⃣ Select ROI"):
                             st.session_state["roi_mode"] = True
                             st.session_state["scale_mode"] = False
 
-                    # Show scale bar UI
-                    if st.session_state.get("scale_mode"):
-                        px_nm = _scale_ui(img_gray, canvas_key=f"scale_canvas_{Path(fig.image_path).name}")
-                        if px_nm:
-                            st.session_state.pixel_to_nm = px_nm
-                            st.success(f"Calculated pixel-to-nm ratio: {px_nm:.6f}")
+                # Show scale bar UI
+                if st.session_state.get("scale_mode"):
+                    px_nm = _scale_ui(img_gray, canvas_key=f"scale_canvas_{Path(working_image_path).name}")
+                    if px_nm:
+                        st.session_state.pixel_to_nm = px_nm
+                        st.success(f"✅ Calculated pixel-to-nm ratio: {px_nm:.6f}")
 
-                    # Show ROI UI
-                    if st.session_state.get("roi_mode"):
-                        roi = _roi_ui(img_gray, canvas_key=f"roi_canvas_{Path(fig.image_path).name}")
+                # Show ROI UI (only if scale bar measured)
+                if st.session_state.get("roi_mode"):
+                    if not has_scale:
+                        st.warning("⚠️ Please measure the scale bar first before selecting ROI!")
+                    else:
+                        roi = _roi_ui(img_gray, canvas_key=f"roi_canvas_{Path(working_image_path).name}")
                         if roi is not None:
                             st.session_state.roi = roi
-                            st.success(f"Selected ROI: {roi}")
+                            st.success(f"✅ Selected ROI: {roi}")
 
-                    # Analyze when both available
-                    if st.session_state.get("pixel_to_nm") and st.session_state.get("roi"):
-                        x, y, w, h = st.session_state.roi
-                        img_roi = img_gray[y : y + h, x : x + w]
-                        res = _measure(img_roi, st.session_state.pixel_to_nm)
-                        if isinstance(res, dict) and all(k in res for k in ["a_nm", "b_nm", "gamma_deg"]):
-                            st.session_state["last_lattice"] = res
-                            # Write minimal CIF
-                            from src.stem_analysis import minimal_cif_from_lattice as _min_cif
-                            out_name = Path(fig.image_path).stem + "_lattice.cif"
-                            out_path = _min_cif(res["a_nm"], res["b_nm"], res["gamma_deg"], out_name)
-                            st.session_state["last_image_cif"] = out_path
-                            st.success(f"Wrote minimal CIF: {out_path}")
-                            with open(out_path, "rb") as f:
-                                st.download_button(
-                                    f"Download {Path(out_path).name}", data=f, file_name=Path(out_path).name, mime="chemical/x-cif"
+                # Show analysis section ONLY when both scale bar and ROI are set
+                if has_scale and has_roi:
+                    x, y, w, h = st.session_state.roi
+                    img_roi = img_gray[y : y + h, x : x + w]
+
+                    # Method selection
+                    st.subheader("Lattice Measurement Method")
+                elif has_scale and not has_roi:
+                    st.info("👉 Next step: Click '2️⃣ Select ROI' to continue")
+                elif not has_scale:
+                    st.info("👉 Start by clicking '1️⃣ Measure Scale Bar'")
+
+                # Only show method selection if both are ready
+                if has_scale and has_roi:
+                    st.subheader("Lattice Measurement Method")
+                    method_choice = st.radio(
+                        "Select measurement approach:",
+                        ["🔄 Hybrid (Auto-fallback)", "📍 Real-space (DBSCAN)", "🌊 FFT (Reciprocal)", "⚖️ Compare All"],
+                        index=0,
+                        horizontal=True,
+                        help=(
+                            "Hybrid: Real-space first, FFT if fails.\n"
+                            "Real-space: Direct atom detection + clustering.\n"
+                            "FFT: Reciprocal space analysis (best for periodic).\n"
+                            "Compare: Run all methods and show differences."
+                        ),
+                        key="lattice_method_select"
+                    )
+
+                    if st.button("🔬 Analyze Lattice", key="analyze_lattice_btn"):
+                        results = {}
+
+                        # Helper to save ROI crop temporarily for stem_analysis functions
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                            roi_path = tmp_file.name
+                            import cv2
+                            cv2.imwrite(roi_path, img_roi)
+
+                        try:
+                            if "🔄" in method_choice or "⚖️" in method_choice:
+                                # Hybrid approach using stem_analysis
+                                st.write("**Running Hybrid Analysis (Real-space → FFT fallback)...**")
+                                try:
+                                    from src.stem_analysis import measure_lattice_vectors
+                                    res_hybrid = measure_lattice_vectors(roi_path, st.session_state.pixel_to_nm)
+                                    results["Hybrid"] = res_hybrid
+                                    st.success(f"✅ Hybrid: a={res_hybrid['a_nm']:.4f} nm, b={res_hybrid['b_nm']:.4f} nm, γ={res_hybrid['gamma_deg']:.2f}°")
+                                    if res_hybrid.get("overlay_path"):
+                                        st.image(res_hybrid["overlay_path"], caption="Hybrid method visualization", use_container_width=True)
+                                except Exception as e:
+                                    st.error(f"Hybrid method failed: {e}")
+                        
+                            if "📍" in method_choice or "⚖️" in method_choice:
+                                # Real-space only
+                                st.write("**Running Real-space Analysis (DBSCAN clustering)...**")
+                                try:
+                                    res_real = _measure(img_roi, st.session_state.pixel_to_nm)
+                                    if res_real and isinstance(res_real, dict):
+                                        results["Real-space"] = res_real
+                                        st.success(f"✅ Real-space: a={res_real['a_nm']:.4f} nm, b={res_real['b_nm']:.4f} nm, γ={res_real['gamma_deg']:.2f}°")
+                                        # Store coordinates for CIF comparison
+                                        if "coords" in res_real and res_real["coords"]:
+                                            st.session_state.fig_coords[working_image_path] = res_real["coords"]
+                                            st.info(f"Stored {len(res_real['coords'])} detected atoms for CIF comparison")
+                                    else:
+                                        st.error("Real-space method returned no results")
+                                except Exception as e:
+                                    st.error(f"Real-space method failed: {e}")
+                        
+                            if "🌊" in method_choice or "⚖️" in method_choice:
+                                # FFT only
+                                st.write("**Running FFT Analysis (Reciprocal space)...**")
+                                try:
+                                    from src.stem_analysis import _fft_reciprocal_vectors
+                                    recips = _fft_reciprocal_vectors(img_roi)
+                                    if len(recips) >= 2:
+                                        r1 = recips[0]
+                                        r2 = None
+                                        for g in recips[1:]:
+                                            import numpy as np
+                                            cosang = float(np.dot(r1, g) / (np.linalg.norm(r1) * np.linalg.norm(g)))
+                                            if abs(cosang) < 0.95:
+                                                r2 = g
+                                                break
+                                        if r2 is not None:
+                                            f1 = float(np.linalg.norm(r1))
+                                            f2 = float(np.linalg.norm(r2))
+                                            a_nm = (1.0 / f1) * st.session_state.pixel_to_nm
+                                            b_nm = (1.0 / f2) * st.session_state.pixel_to_nm
+                                            ang_star = float(np.degrees(np.arccos(np.clip(
+                                                np.dot(r1, r2) / (np.linalg.norm(r1) * np.linalg.norm(r2)), -1.0, 1.0
+                                            ))))
+                                            angle = 180.0 - ang_star
+                                            res_fft = {
+                                                "a_nm": float(a_nm),
+                                                "b_nm": float(b_nm),
+                                                "gamma_deg": float(angle),
+                                                "method": "FFT"
+                                            }
+                                            results["FFT"] = res_fft
+                                            st.success(f"✅ FFT: a={a_nm:.4f} nm, b={b_nm:.4f} nm, γ={angle:.2f}°")
+                                        
+                                            # Visualize FFT power spectrum
+                                            F = np.fft.fftshift(np.fft.fft2(img_roi.astype(np.float32)))
+                                            P = np.log1p(np.abs(F))
+                                            P_norm = ((P - P.min()) / (P.max() - P.min() + 1e-8) * 255).astype(np.uint8)
+                                            import cv2
+                                            P_color = cv2.applyColorMap(P_norm, cv2.COLORMAP_JET)
+                                            # Draw detected vectors
+                                            cx, cy = img_roi.shape[1] // 2, img_roi.shape[0] // 2
+                                            scale = min(img_roi.shape[:2]) * 0.4
+                                            p1 = (int(cx + r1[0] * scale), int(cy + r1[1] * scale))
+                                            p2 = (int(cx + r2[0] * scale), int(cy + r2[1] * scale))
+                                            cv2.arrowedLine(P_color, (cx, cy), p1, (255, 255, 255), 2, line_type=cv2.LINE_AA)
+                                            cv2.arrowedLine(P_color, (cx, cy), p2, (0, 255, 255), 2, line_type=cv2.LINE_AA)
+                                            st.image(P_color, caption="FFT Power Spectrum with detected lattice vectors", use_container_width=True)
+                                        else:
+                                            st.error("Could not find two non-collinear reciprocal vectors")
+                                    else:
+                                        st.error("FFT found fewer than 2 peaks")
+                                except Exception as e:
+                                    st.error(f"FFT method failed: {e}")
+                                    import traceback
+                                    st.code(traceback.format_exc())
+                        
+                            # Comparison table if multiple methods ran
+                            if len(results) > 1:
+                                st.subheader("📊 Method Comparison")
+                                import pandas as pd
+                            
+                                comparison_data = []
+                                for method_name, res in results.items():
+                                    comparison_data.append({
+                                        "Method": method_name,
+                                        "a (nm)": f"{res['a_nm']:.4f}",
+                                        "b (nm)": f"{res['b_nm']:.4f}",
+                                        "γ (deg)": f"{res['gamma_deg']:.2f}",
+                                        "n_atoms": res.get('n_atoms', 'N/A')
+                                    })
+                            
+                                df = pd.DataFrame(comparison_data)
+                                st.dataframe(df, use_container_width=True)
+                            
+                                # Calculate agreement metrics
+                                if len(results) >= 2:
+                                    methods = list(results.keys())
+                                    r1 = results[methods[0]]
+                                    r2 = results[methods[1]]
+                                
+                                    a_diff_pct = abs(r1['a_nm'] - r2['a_nm']) / r1['a_nm'] * 100
+                                    b_diff_pct = abs(r1['b_nm'] - r2['b_nm']) / r1['b_nm'] * 100
+                                    angle_diff = abs(r1['gamma_deg'] - r2['gamma_deg'])
+                                
+                                    st.write("**Agreement Analysis:**")
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        color = "green" if a_diff_pct < 5 else ("orange" if a_diff_pct < 10 else "red")
+                                        st.metric("a difference", f"{a_diff_pct:.2f}%", delta=None)
+                                        if a_diff_pct < 5:
+                                            st.success("Excellent agreement")
+                                        elif a_diff_pct < 10:
+                                            st.warning("Moderate agreement")
+                                        else:
+                                            st.error("Poor agreement")
+                                    with col2:
+                                        st.metric("b difference", f"{b_diff_pct:.2f}%", delta=None)
+                                        if b_diff_pct < 5:
+                                            st.success("Excellent agreement")
+                                        elif b_diff_pct < 10:
+                                            st.warning("Moderate agreement")
+                                        else:
+                                            st.error("Poor agreement")
+                                    with col3:
+                                        st.metric("γ difference", f"{angle_diff:.2f}°", delta=None)
+                                        if angle_diff < 2:
+                                            st.success("Excellent agreement")
+                                        elif angle_diff < 5:
+                                            st.warning("Moderate agreement")
+                                        else:
+                                            st.error("Poor agreement")
+                        
+                            # Use the best result for CIF generation
+                            if results:
+                                # Priority: Hybrid > Real-space > FFT
+                                best_result = results.get("Hybrid") or results.get("Real-space") or results.get("FFT")
+                                st.session_state["last_lattice"] = best_result
+                            
+                                # Store all results for reference
+                                st.session_state["all_lattice_results"] = results
+                            
+                                st.subheader("💾 Generate CIF from Measurements")
+                                cif_method = st.selectbox(
+                                    "Choose result to save as CIF:",
+                                    list(results.keys()),
+                                    key="cif_method_select"
                                 )
+                            
+                                if st.button("Generate CIF", key="gen_cif_from_lattice"):
+                                    selected_res = results[cif_method]
+                                    from src.stem_analysis import minimal_cif_from_lattice as _min_cif
+                                    out_name = Path(fig.image_path).stem + f"_lattice_{cif_method.lower()}.cif"
+                                    out_path = _min_cif(
+                                        selected_res["a_nm"],
+                                        selected_res["b_nm"],
+                                        selected_res["gamma_deg"],
+                                        out_name
+                                    )
+                                    st.session_state["last_image_cif"] = out_path
+                                    st.success(f"✅ Wrote CIF: {out_path}")
+                                    with open(out_path, "rb") as f:
+                                        st.download_button(
+                                            f"Download {Path(out_path).name}",
+                                            data=f,
+                                            file_name=Path(out_path).name,
+                                            mime="chemical/x-cif",
+                                            key="download_cif_lattice"
+                                        )
+
+                        finally:
+                            # Clean up temp file
+                            try:
+                                import os
+                                os.unlink(roi_path)
+                            except:
+                                pass
 
     coords = st.session_state.fig_coords.get(crop_path or (fig.image_path if fig else None))
     # Button to create CIF from cropped region context

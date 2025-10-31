@@ -23,7 +23,7 @@ def extract_code(text: str) -> str:
 
 def run_code(code: str) -> tuple[str, str, int]:
     """Run code in a temp .py file and capture stdout, stderr, exit code."""
-    with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
+    with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w", encoding="utf-8") as f:
         f.write(code)
         f.flush()
         result = subprocess.run(

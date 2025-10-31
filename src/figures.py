@@ -279,15 +279,39 @@ def hough_circles_detect(image_path: str) -> List[Tuple[float, float, float]]:
 
 
 def run_tem_to_atom_coords(image_path: str) -> List[Tuple[float, float]]:
-    """Try external circle_detection.TEMtoAtomCoordinates first; fallback to HoughCircles.
+    """Detect atomic coordinates using the same algorithm as measure_atomic_spacing_realspace.
+    Uses CLAHE enhancement + peak_local_max for consistent atom detection.
     Returns list of (x,y) coordinates in pixel units.
     """
-    # Attempt to import external module if present in repo
+    import cv2  # type: ignore
+
     try:
-        from circle_detection.TEMtoAtomCoordinates import process_image as tem_process  # type: ignore
-        coords = tem_process(image_path)  # expected to return Nx2
+        from skimage.feature import peak_local_max  # type: ignore
+
+        # Load image
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise RuntimeError(f"Failed to read image: {image_path}")
+
+        # CLAHE enhancement - same as measure_atomic_spacing_realspace
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img_enhanced = clahe.apply(img)
+
+        # Detect atom centers - SAME parameters as measure_atomic_spacing_realspace
+        min_dist = 5
+        coordinates = peak_local_max(img_enhanced, min_distance=min_dist, threshold_rel=0.6, exclude_border=True)
+
+        if len(coordinates) < 5:
+            # Return empty list if too few atoms detected
+            return []
+
+        # coordinates are in (row, col) format from peak_local_max
+        # Convert to (x, y) by reversing: coords[:, ::-1]
+        coords = coordinates[:, ::-1]
         return [(float(x), float(y)) for x, y in coords]
-    except Exception:
+
+    except Exception as e:
+        # Fallback to HoughCircles if peak_local_max unavailable
         circles = hough_circles_detect(image_path)
         return [(x, y) for (x, y, r) in circles]
 

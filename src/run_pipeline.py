@@ -1,13 +1,48 @@
 import argparse
-import json
 import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from .graph import run_graph, load_paper, plan_targets, synthesize_code
+try:
+    from .graph import run_graph, load_paper, plan_targets, synthesize_code
+except ImportError:
+    # Allow execution as a standalone script when src/ isn't installed as a package.
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.append(str(project_root))
+    from src.graph import run_graph, load_paper, plan_targets, synthesize_code  # type: ignore
+
+
+def _slugify_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value)
+    return cleaned.strip("_") or "paper"
+
+
+def _prepare_run_directory(pdf_path: str) -> Path:
+    base_dir = Path(
+        os.environ.get(
+            "ATOMBRIDGE_RUN_ROOT",
+            Path(__file__).resolve().parent.parent / "runs",
+        )
+    )
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    paper_stem = Path(pdf_path).stem
+    slug = _slugify_name(paper_stem)
+    candidate = f"{timestamp}_{slug}"
+    run_dir = base_dir / candidate
+    counter = 2
+    while run_dir.exists():
+        run_dir = base_dir / f"{candidate}_{counter:02d}"
+        counter += 1
+    run_dir.mkdir(parents=True, exist_ok=False)
+    return run_dir
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run TEM→ASE→CIF pipeline")
+    parser = argparse.ArgumentParser(description="Run TEM->ASE->CIF pipeline")
     parser.add_argument("--pdf", required=True, help="Path to the paper PDF")
     parser.add_argument("--notes", default=None, help="Optional user notes/preferences")
     parser.add_argument("--skip-exec", action="store_true", help="Stop after code synthesis (do not execute)")
@@ -39,7 +74,19 @@ def main():
             print(f"Saved generated code to {args.save_code}")
         return
 
-    final = run_graph(args.pdf, args.notes, plan_model=args.plan_model, code_model=args.code_model)
+    run_dir: Optional[Path] = None
+    if not args.skip_exec:
+        run_dir = _prepare_run_directory(args.pdf)
+        os.environ["ATOMBRIDGE_CIF_OUTPUT_DIR"] = str(run_dir)
+        print(f"Writing generated .cif files to {run_dir}")
+
+    final: dict = {}
+    try:
+        final = run_graph(args.pdf, args.notes, plan_model=args.plan_model, code_model=args.code_model)
+    finally:
+        if run_dir:
+            os.environ.pop("ATOMBRIDGE_CIF_OUTPUT_DIR", None)
+
     print("Return code:", final.get("run_rc"))
     if args.mp_validate:
         print("MP validation:", final.get("mp_validation"))
@@ -47,6 +94,14 @@ def main():
         with open(args.save_code, "w", encoding="utf-8") as f:
             f.write(final["generated_code"])
         print(f"Saved generated code to {args.save_code}")
+    if run_dir:
+        cif_files = sorted(run_dir.glob("*.cif"))
+        if cif_files:
+            print("\nSaved CIF files:")
+            for path in cif_files:
+                print(f" - {path.name}")
+        else:
+            print(f"\nNo .cif files were generated in {run_dir}")
     print("\nSTDOUT (truncated):\n", (final.get("run_stdout") or "")[:1000])
     print("\nSTDERR (truncated):\n", (final.get("run_stderr") or "")[:1000])
 

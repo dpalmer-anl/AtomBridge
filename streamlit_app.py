@@ -1180,7 +1180,14 @@ else:
 
 st.subheader("Crop region to analyze")
 crop_path = None
-if fig is not None:
+# Check if this is a manual PDF crop - if so, skip this section
+is_manual_crop = getattr(fig, 'is_manual_crop', False) if fig else False
+
+if is_manual_crop and fig is not None:
+    # Manual crops already selected their region - skip to post-processing
+    st.info("ℹ️ **Manual crop mode:** Your selected region is ready. Proceed to 'Post-process selected image' below to measure scale bar and select ROI.")
+    crop_path = None  # Don't set crop_path, go straight to post-processing
+elif fig is not None:
     from PIL import Image as PILImage
     from PIL import ImageDraw
     from streamlit_drawable_canvas import st_canvas

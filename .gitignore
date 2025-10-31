@@ -21,3 +21,9 @@ cif_files/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code settings
+.claude/
+
+# Research PDFs
+LLM SEM scale bar extraction.pdf

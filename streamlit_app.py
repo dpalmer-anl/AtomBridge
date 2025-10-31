@@ -1647,14 +1647,14 @@ if fig is not None or crop_path:
                                             mime="chemical/x-cif",
                                             key="download_cif_lattice"
                                         )
-                        
-                    finally:
-                        # Clean up temp file
-                        try:
-                            import os
-                            os.unlink(roi_path)
-                        except:
-                            pass
+
+                        finally:
+                            # Clean up temp file
+                            try:
+                                import os
+                                os.unlink(roi_path)
+                            except:
+                                pass
 
     coords = st.session_state.fig_coords.get(crop_path or (fig.image_path if fig else None))
     # Button to create CIF from cropped region context

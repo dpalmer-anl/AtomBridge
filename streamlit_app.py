@@ -1061,11 +1061,13 @@ if st.session_state.get("manual_pdf_mode") and st.session_state.get("manual_pdf_
                         page_index: int
                         page_text: str = ""
                         is_tem: bool = True
+                        is_manual_crop: bool = True  # Flag to identify manual crops
 
                     manual_fig = ManualFigure(
                         image_path=cpath,
                         caption=f"Manual crop from page {page_num}",
-                        page_index=page_num - 1
+                        page_index=page_num - 1,
+                        is_manual_crop=True
                     )
                     st.session_state.figures = [manual_fig]
                     st.session_state.figure_idx = 0
@@ -1178,7 +1180,9 @@ else:
 
 st.subheader("Crop region to analyze")
 crop_path = None
-if fig is not None:
+# Skip crop section if this is already a manual crop from PDF
+is_manual_crop = getattr(fig, 'is_manual_crop', False) if fig else False
+if fig is not None and not is_manual_crop:
     from PIL import Image as PILImage
     from PIL import ImageDraw
     from streamlit_drawable_canvas import st_canvas
@@ -1324,6 +1328,10 @@ if fig is not None:
         cpath = st.session_state["crop_preview_path"]
         st.image(cpath, caption="✂️ Cropped region preview", use_container_width=True)
         crop_path = cpath
+elif is_manual_crop and fig is not None:
+    # For manual crops, the full image IS the selected region - no need to crop again
+    st.info("ℹ️ Manual crop already selected. Proceed to 'Post-process selected image' below.")
+    crop_path = fig.image_path  # Use the manual crop directly
 
 if crop_path and st.button("Detect atoms in selected region"):
     with st.spinner("Detecting atomic coordinates in image..."):
@@ -1391,26 +1399,48 @@ if fig is not None or crop_path:
             if st.session_state.get("selected_image_path") == working_image_path:
                 st.success(f"Selected: {Path(working_image_path).name} for measurement workflow.")
 
+                # Check if this is a manual crop - if so, skip ROI selection
+                is_working_manual_crop = getattr(fig, 'is_manual_crop', False) if fig and working_image_path == fig.image_path else False
+
                 # Workflow status indicators
                 has_scale = st.session_state.get("pixel_to_nm") is not None
                 has_roi = st.session_state.get("roi") is not None
 
-                st.info("📋 **Workflow Steps:** 1️⃣ Measure Scale Bar → 2️⃣ Select ROI → 3️⃣ Analyze Lattice")
+                # For manual crops, auto-populate ROI with full image dimensions
+                if is_working_manual_crop and not has_roi:
+                    h, w = img_gray.shape
+                    st.session_state.roi = (0, 0, w, h)
+                    has_roi = True
+                    st.info(f"✅ Using full manual crop as ROI: {w}×{h} px")
 
-                cbtn1, cbtn2 = st.columns(2)
-                with cbtn1:
+                # Show appropriate workflow steps
+                if is_working_manual_crop:
+                    st.info("📋 **Workflow Steps:** 1️⃣ Measure Scale Bar → 2️⃣ Analyze Lattice")
+                else:
+                    st.info("📋 **Workflow Steps:** 1️⃣ Measure Scale Bar → 2️⃣ Select ROI → 3️⃣ Analyze Lattice")
+
+                # Button layout depends on whether ROI is needed
+                if is_working_manual_crop:
+                    # Only scale bar button for manual crops
                     if st.button("1️⃣ Measure Scale Bar"):
                         st.session_state["scale_mode"] = True
                         st.session_state["roi_mode"] = False
-                with cbtn2:
-                    # Disable ROI button if scale bar not measured
-                    roi_disabled = not has_scale
-                    if roi_disabled:
-                        st.button("2️⃣ Select ROI", disabled=True, help="⚠️ Measure scale bar first!")
-                    else:
-                        if st.button("2️⃣ Select ROI"):
-                            st.session_state["roi_mode"] = True
-                            st.session_state["scale_mode"] = False
+                else:
+                    # Both buttons for regular images
+                    cbtn1, cbtn2 = st.columns(2)
+                    with cbtn1:
+                        if st.button("1️⃣ Measure Scale Bar"):
+                            st.session_state["scale_mode"] = True
+                            st.session_state["roi_mode"] = False
+                    with cbtn2:
+                        # Disable ROI button if scale bar not measured
+                        roi_disabled = not has_scale
+                        if roi_disabled:
+                            st.button("2️⃣ Select ROI", disabled=True, help="⚠️ Measure scale bar first!")
+                        else:
+                            if st.button("2️⃣ Select ROI"):
+                                st.session_state["roi_mode"] = True
+                                st.session_state["scale_mode"] = False
 
                 # Show scale bar UI
                 if st.session_state.get("scale_mode"):
@@ -1419,8 +1449,8 @@ if fig is not None or crop_path:
                         st.session_state.pixel_to_nm = px_nm
                         st.success(f"✅ Calculated pixel-to-nm ratio: {px_nm:.6f}")
 
-                # Show ROI UI (only if scale bar measured)
-                if st.session_state.get("roi_mode"):
+                # Show ROI UI (only if scale bar measured and NOT a manual crop)
+                if st.session_state.get("roi_mode") and not is_working_manual_crop:
                     if not has_scale:
                         st.warning("⚠️ Please measure the scale bar first before selecting ROI!")
                     else:
@@ -1437,9 +1467,14 @@ if fig is not None or crop_path:
                     # Method selection
                     st.subheader("Lattice Measurement Method")
                 elif has_scale and not has_roi:
-                    st.info("👉 Next step: Click '2️⃣ Select ROI' to continue")
+                    # This should only happen for non-manual crops (manual crops auto-populate ROI)
+                    if not is_working_manual_crop:
+                        st.info("👉 Next step: Click '2️⃣ Select ROI' to continue")
                 elif not has_scale:
-                    st.info("👉 Start by clicking '1️⃣ Measure Scale Bar'")
+                    if is_working_manual_crop:
+                        st.info("👉 Next step: Measure the scale bar to continue")
+                    else:
+                        st.info("👉 Start by clicking '1️⃣ Measure Scale Bar'")
 
                 # Only show method selection if both are ready
                 if has_scale and has_roi:

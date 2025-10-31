@@ -27,7 +27,7 @@ def run_code(code: str) -> tuple[str, str, int]:
     If ``ATOMBRIDGE_CIF_OUTPUT_DIR`` is set, the generated script executes inside
     that directory so relative outputs (e.g., .cif files) are captured there.
     """
-    with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
+    with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w", encoding="utf-8") as f:
         f.write(code)
         f.flush()
         run_dir = os.environ.get("ATOMBRIDGE_CIF_OUTPUT_DIR")

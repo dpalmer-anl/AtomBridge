@@ -245,4 +245,10 @@ def measure_atomic_spacing_realspace(img, pixel_to_nm_ratio):
     st.pyplot(fig)
     plt.close(fig)
 
-    return {"a_nm": float(len_a_nm), "b_nm": float(len_b_nm), "gamma_deg": float(angle_deg)}
+    # Return both lattice parameters and coordinates for CIF comparison
+    return {
+        "a_nm": float(len_a_nm),
+        "b_nm": float(len_b_nm),
+        "gamma_deg": float(angle_deg),
+        "coords": [(float(x), float(y)) for x, y in coords]  # Include detected atom coordinates
+    }

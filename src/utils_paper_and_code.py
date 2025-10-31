@@ -1,4 +1,5 @@
-﻿import re
+import os
+import re
 import subprocess
 import tempfile
 from langchain_community.document_loaders import PyPDFLoader
@@ -21,11 +22,23 @@ def extract_code(text: str) -> str:
 
 
 def run_code(code: str) -> tuple[str, str, int]:
-    """Run code in a temp .py file; return (stdout, stderr, exit_code)."""
+    """Run code in a temp .py file; return (stdout, stderr, exit_code).
+
+    If ``ATOMBRIDGE_CIF_OUTPUT_DIR`` is set, the generated script executes inside
+    that directory so relative outputs (e.g., .cif files) are captured there.
+    """
     with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
         f.write(code)
         f.flush()
-        result = subprocess.run(["python", f.name], capture_output=True, text=True)
+        run_dir = os.environ.get("ATOMBRIDGE_CIF_OUTPUT_DIR")
+        if run_dir:
+            os.makedirs(run_dir, exist_ok=True)
+        result = subprocess.run(
+            ["python", f.name],
+            capture_output=True,
+            text=True,
+            cwd=run_dir or None,
+        )
     # Ensure outputs are handled as UTF-8 to avoid charmap errors on Windows
     try:
         out = result.stdout.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
@@ -76,7 +89,6 @@ def extract_candidates_from_texts(texts: list[str]) -> list[dict]:
     """Heuristically extract composition formulas and structure keywords from texts.
     Returns list of dicts: {formula, keywords, count, weight} sorted by weight desc.
     """
-    import re
     from collections import Counter, defaultdict
 
     # Regex: tokens like LiCoO2, Co3O4, SrTiO3, etc. At least 2 elements

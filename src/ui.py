@@ -191,7 +191,13 @@ if st.session_state.figure_data is not None and len(st.session_state.images) > 0
         if img_full_gray is not None:
             x, y, w, h = st.session_state.roi
             img_roi_gray = img_full_gray[y:y+h, x:x+w]
-            measure_atomic_spacing_realspace(img_roi_gray, st.session_state.pixel_to_nm)
+            result = measure_atomic_spacing_realspace(img_roi_gray, st.session_state.pixel_to_nm)
+            if result:
+                st.session_state.analysis_results = result
+                st.info(
+                    f"Lattice (nm): a={result['a_nm']:.4f}, "
+                    f"b={result['b_nm']:.4f}, gamma={result['gamma_deg']:.2f} deg"
+                )
         else:
             st.error("Failed to load the selected image.")
 
